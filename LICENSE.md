@@ -22,6 +22,7 @@ The WASM build was made possible by https://github.com/DSchroer/openscad-wasm.
 * [GNU MP](#gnu-mp)
 * [OpenSCAD](#openscad)
 * [CGAL](#cgal)
+* [JSZip](#jszip)
 * [Manifold](#manifold)
 * [Eigen](#eigen)
 * [glib2](#glib2)
@@ -34,6 +35,7 @@ The WASM build was made possible by https://github.com/DSchroer/openscad-wasm.
 * [double-conversion](#double-conversion)
 * [Liberation Fonts](#liberation-fonts)
 * [Noto Fonts](#noto-fonts)
+* [Fork me on GitHub CSS ribbon](#fork-me-on-github-css-ribbon)
 * [SCAD Libraries](#scad-libraries)
   + [BOSL2](#bosl2)
   + [NopSCADlib](#nopscadlib)
@@ -57,6 +59,12 @@ The WASM build was made possible by https://github.com/DSchroer/openscad-wasm.
 https://github.com/elalish/manifold
 
 Licensed under the [Apache 2.0](#apache2) license.
+
+## JSZip
+
+https://github.com/Stuk/jszip
+
+Licensed under the [GPLv3](#gplv3) (actually dual-licensed under MIT, but we're picking this one here for brevity).
 
 ## PrimeReact
 
@@ -856,6 +864,34 @@ https://github.com/jon-gilbert/openscad_attachable_text3d
 MIT License
 
 Copyright (c) 2023 Jon Gilbert
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Fork me on GitHub CSS ribbon
+
+https://github.com/simonwhitaker/github-fork-ribbon-css
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2013 Simon Whitaker
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
