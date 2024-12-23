@@ -60,6 +60,18 @@ export default function EditorPanel({ className, style }: { className?: string, 
       label: "Preview OpenSCAD",
       run: () => model.render({ isPreview: true, now: true })
     });
+    editor.addAction({
+      id: "openscad-save-do-nothing",
+      label: "Save (disabled)",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      run: () => {}
+    });
+    editor.addAction({
+      id: "openscad-save-project",
+      label: "Save OpenSCAD project",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS],
+      run: () => model.saveProject()
+    });
     setEditor(editor)
   }
 
@@ -129,45 +141,13 @@ export default function EditorPanel({ className, style }: { className?: string, 
             disabled: !('showOpenFilePicker' in self),
             command: () => { const fileSystem = new LocalFileSystem(); fileSystem.initialise().finally(() => fileSystemState?.setFileSystem(fileSystem)) },
           },
-          // https://vscode-docs.readthedocs.io/en/stable/customization/keybindings/
-          // {
-          //   label: 'Undo',
-          //   icon: 'pi pi-undo',
-          //   // disabled: true,
-          //   command: () => editor?.trigger(state.params.sourcePath, 'editor.action.undoAction', null),
-          // },
-          // {
-          //   label: 'Redo',
-          //   icon: 'pi pi-reply',
-          //   // disabled: true,
-          //   command: () => editor?.trigger(state.params.sourcePath, 'editor.action.redoAction', null),
-          // },
           {
             separator: true
           },
-          // {
-          //   label: 'Copy',
-          //   icon: 'pi pi-copy',
-          //   // disabled: true,
-          //   command: () => editor?.trigger(state.params.sourcePath, 'editor.action.clipboardCopyAction', null),
-          // },
-          // {
-          //   label: 'Cut',
-          //   icon: 'pi pi-eraser',
-          //   // disabled: true,
-          //   command: () => editor?.trigger(state.params.sourcePath, 'editor.action.clipboardCutAction', null),
-          // },
-          // {
-          //   label: 'Paste',
-          //   icon: 'pi pi-images',
-          //   // disabled: true,
-          //   command: () => editor?.trigger(state.params.sourcePath, 'editor.action.clipboardPasteAction', null),
-          // },
           {
             label: 'Select All',
             icon: 'pi pi-info-circle',
-            // disabled: true,
-            command: () => editor?.trigger(state.params.sourcePath, 'editor.action.selectAll', null),
+            command: () => editor?.trigger(state.params.activePath, 'editor.action.selectAll', null),
           },
           {
             separator: true
@@ -175,8 +155,7 @@ export default function EditorPanel({ className, style }: { className?: string, 
           {
             label: 'Find',
             icon: 'pi pi-search',
-            // disabled: true,
-            command: () => editor?.trigger(state.params.sourcePath, 'actions.find', null),
+            command: () => editor?.trigger(state.params.activePath, 'actions.find', null),
           },
         ] as MenuItem[]} popup ref={menu} />
         <Button title="Editor menu" rounded text icon="pi pi-ellipsis-h" onClick={(e) => menu.current && menu.current.toggle(e)} />
@@ -186,11 +165,11 @@ export default function EditorPanel({ className, style }: { className?: string, 
             flex: 1,
           }} />
 
-        {state.params.sourcePath !== defaultSourcePath &&
-          <Button icon="pi pi-chevron-left"
-            text
-            onClick={() => model.openFile(defaultSourcePath)}
-            title={`Go back to ${defaultSourcePath}`} />}
+        {state.params.activePath !== defaultSourcePath && 
+          <Button icon="pi pi-chevron-left" 
+          text
+          onClick={() => model.openFile(defaultSourcePath)} 
+          title={`Go back to ${defaultSourcePath}`}/>}
 
       </div>
 
@@ -203,25 +182,22 @@ export default function EditorPanel({ className, style }: { className?: string, 
           <Editor
             className="openscad-editor absolute-fill"
             defaultLanguage="openscad"
-            path={state.params.sourcePath}
-            value={state.params.source}
+            path={state.params.activePath}
+            value={model.source}
             onChange={s => model.source = s ?? ''}
             onMount={onMount} // TODO: This looks a bit silly, does it trigger a re-render??
             options={{
               ...openscadEditorOptions,
               fontSize: 16,
               lineNumbers: state.view.lineNumbers ? 'on' : 'off',
-              // readOnly: !isFileWritable(state.params.sourcePath)
             }}
           />
         )}
         {!isMonacoSupported && (
-          <InputTextarea
-            style={{
-            }}
+          <InputTextarea 
             className="openscad-editor absolute-fill"
-            value={state.params.source}
-            onChange={s => model.source = s.target.value ?? ''}
+            value={model.source}
+            onChange={s => model.source = s.target.value ?? ''}  
           />
         )}
       </div>
@@ -231,8 +207,9 @@ export default function EditorPanel({ className, style }: { className?: string, 
         overflowY: 'scroll',
         height: 'calc(min(200px, 30vh))',
       }}>
-        <pre><code id="logs" style={{
-        }}>{state.lastCheckerRun?.logText ?? 'No log yet!'}</code></pre>
+        {(state.currentRunLogs ?? []).map(([type, text], i) => (
+          <pre key={i}>{text}</pre>
+        ))}
       </div>
 
     </div>

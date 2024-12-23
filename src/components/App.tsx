@@ -13,11 +13,7 @@ import CustomizerPanel from './CustomizerPanel';
 import { BaseFileSystem, DummyFileSystem, LocalStorage } from '../fs/base-filesystem';
 
 
-// import "primereact/resources/themes/lara-light-indigo/theme.css";
-// import "primereact/resources/primereact.min.css";
-// import "primeicons/primeicons.css"; 
-
-export function App({ initialState, statePersister, fs }: { initialState: State, statePersister: StatePersister, fs: FS }) {
+export function App({initialState, statePersister, fs}: {initialState: State, statePersister: StatePersister, fs: FS}) {
   const [state, setState] = useState(initialState);
   const [fileSystem, setFileSystem] = useState(new LocalStorage() as BaseFileSystem);
 
