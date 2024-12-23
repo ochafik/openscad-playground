@@ -1,5 +1,5 @@
 # Pin WASM build to a version known to work
-WASM_BUILD_URL=https://output.circle-artifacts.com/output/job/fdf49786-06c1-4775-aaa3-15dc089efc12/artifacts/0/wasm/OpenSCAD-2024.12.22.wasm21804-WebAssembly-web.zip
+WASM_BUILD_URL=https://output.circle-artifacts.com/output/job/4e9c7361-c5f2-46c8-a7ec-dc6ac1c6790a/artifacts/0/wasm/OpenSCAD-2024.12.23.wasm21824_PR5523-WebAssembly-web.zip
 # WASM_SNAPSHOT_JS_URL=https://files.openscad.org/snapshots/.snapshot_wasm.js
 # WASM_BUILD_URL=$(shell curl ${WASM_SNAPSHOT_JS_URL} 2>/dev/null | grep https | sed -E "s/.*(https:[^']+)'.*/\1/" )
 
@@ -8,10 +8,11 @@ SINGLE_BRANCH=--branch master --single-branch
 SHALLOW=--depth 1
 
 SHELL:=/usr/bin/env bash
+WASM_BUILD=Release
 
 all: public
 
-.PHONY: public
+.PHONY: public wasm
 public: \
 		src/wasm \
 		public/openscad.js \
@@ -41,7 +42,7 @@ public: \
 clean:
 	rm -fR libs build
 	rm -fR public/openscad.{js,wasm}
-	rm -fR public/libraries
+	rm -fR public/libraries/*.zip
 	rm -fR src/wasm
 
 dist/index.js: public
@@ -54,13 +55,11 @@ src/wasm: libs/openscad-wasm
 	rm -f src/wasm
 	ln -sf "$(shell pwd)/libs/openscad-wasm" src/wasm
 
-# libs/openscad/build/openscad.js: libs/openscad
-# 	( cd libs/openscad && ./scripts/wasm-base-docker-run.sh emcmake cmake -B build -DCMAKE_BUILD_TYPE=Release -DEXPERIMENTAL=1 )
-# 	( cd libs/openscad && ./scripts/wasm-base-docker-run.sh /bin/bash -c "cmake --build build -j || cmake --build build -j2 || cmake --build build" )
-
-# libs/openscad-wasm: libs/openscad/build/openscad.js
-# 	mkdir -p libs/openscad-wasm
-# 	cp libs/openscad/build/openscad.* libs/openscad-wasm/
+wasm: libs/openscad
+	( cd libs/openscad && ./scripts/wasm-base-docker-run.sh emcmake cmake -B build -DCMAKE_BUILD_TYPE=$(WASM_BUILD) -DEXPERIMENTAL=1 )
+	( cd libs/openscad && ./scripts/wasm-base-docker-run.sh /bin/bash -c "cmake --build build -j || cmake --build build -j2 || cmake --build build" )
+	mkdir -p libs/openscad-wasm
+	cp libs/openscad/build/openscad.* libs/openscad-wasm/
 
 libs/openscad-wasm:
 	mkdir -p libs/openscad-wasm
@@ -143,7 +142,7 @@ libs/openscad:
 
 public/libraries/openscad.zip: libs/openscad
 	mkdir -p public/libraries
-	( cd libs/openscad ; zip -r ../../public/libraries/openscad.zip `find examples -name '*.scad' | grep -v tests` )
+	( cd libs/openscad ; zip -r - `find examples -name '*.scad' | grep -v tests` ) > public/libraries/openscad.zip 
 
 libs/BOSL2: 
 	git clone --recurse https://github.com/BelfrySCAD/BOSL2.git ${SHALLOW} ${SINGLE_BRANCH} $@

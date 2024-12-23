@@ -9,7 +9,7 @@ export function buildUrlForStateParams(state: State) {//partialState: {params: S
   return `${location.protocol}//${location.host}${location.pathname}#${encodeStateParamsAsFragment(state)}`;
 }
 export async function writeStateInFragment(state: State) {
-  window.location.hash = await encodeStateParamsAsFragment(state);
+  history.replaceState(state, '', '#' + await encodeStateParamsAsFragment(state));
 }
 async function compressString(input: string): Promise<string> {
   return btoa(String.fromCharCode(...new Uint8Array(await new Response(new ReadableStream({
@@ -67,7 +67,7 @@ export async function readStateFromFragment(): Promise<State | null> {
           // Source deserialization also handles legacy links (source + sourcePath)
           sources: params?.sources ?? (params?.source ? [{path: params?.sourcePath, content: params?.source}] : undefined), // TODO: validate!
           exportFormat2D: validateStringEnum(params?.exportFormat, Object.keys(VALID_EXPORT_FORMATS_2D), s => 'svg'),
-          exportFormat3D: validateStringEnum(params?.exportFormat, Object.keys(VALID_EXPORT_FORMATS_3D), s => 'off'),
+          exportFormat3D: validateStringEnum(params?.exportFormat, Object.keys(VALID_EXPORT_FORMATS_3D), s => 'glb'),
         },
         view: {
           logs: validateBoolean(view?.logs),
@@ -82,7 +82,6 @@ export async function readStateFromFragment(): Promise<State | null> {
           collapsedCustomizerTabs: validateArray(view?.collapsedCustomizerTabs, validateString),
           color: validateString(view?.color, () => defaultModelColor),
           showAxes: validateBoolean(view?.layout?.showAxis, () => true),
-          showShadows: validateBoolean(view?.layout?.showShadow, () => true),
           lineNumbers: validateBoolean(view?.layout?.lineNumbers, () => false)
         }
       };
