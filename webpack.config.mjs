@@ -1,7 +1,7 @@
 import CopyPlugin from 'copy-webpack-plugin';
 import path, {dirname} from 'path';
-const WorkboxPlugin = require('workbox-webpack-plugin');
-const webpack = require('webpack');
+import WorkboxPlugin from 'workbox-webpack-plugin'
+import webpack from 'webpack'
 
 import {fileURLToPath} from 'url';
 
