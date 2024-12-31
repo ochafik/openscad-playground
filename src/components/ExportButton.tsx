@@ -64,7 +64,18 @@ export default function ExportButton({className, style}: {className?: string, st
           icon: 'pi pi-cog',
           command: () => model!.mutate(s => s.view.extruderPickerVisibility = 'editing'),
         }
-      ];
+      ],
+      {
+        separator: true
+      },
+      {
+        data: 'csg',
+        buttonLabel: 'CSG',
+        label: 'CSG (simple OpenSCAD export)',
+        icon: 'pi pi-file',
+        command: () => model!.setFormats(undefined, 'csg'),
+      },
+    ];
 
     const exportFormat = state.is2D ? state.params.exportFormat2D : state.params.exportFormat3D;
     const selectedItem = dropdownModel.filter(item => item.data === exportFormat)[0] || dropdownModel[0]!;

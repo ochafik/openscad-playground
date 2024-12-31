@@ -1,8 +1,8 @@
 
-export const VALID_RENDER_FORMATS = {
-  'off': true,
-  'svg': true,
-};
+// export const VALID_RENDER_FORMATS = {
+//   'off': true,
+//   'svg': true,
+// };
 export const VALID_EXPORT_FORMATS_2D = {
   'svg': true,
   'dxf': true,
@@ -12,6 +12,7 @@ export const VALID_EXPORT_FORMATS_3D = {
   'off': true,
   'glb': true,
   '3mf': true,
+  'csg': true,
 };
 
 export function is2DFormatExtension(ext: string) {
