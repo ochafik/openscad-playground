@@ -78,8 +78,9 @@ src/asmjs: libs/openscad-asmjs
 
 libs/openscad-wasm:
 	mkdir -p libs/openscad-wasm
-	wget ${WASM_BUILD_URL} -O libs/openscad-wasm.zip
-	( cd libs/openscad-wasm && unzip ../openscad-wasm.zip )
+	( command -v wget >/dev/null && wget ${WASM_BUILD_URL} -O libs/openscad-wasm.zip ) || \
+		curl -fSL ${WASM_BUILD_URL} -o libs/openscad-wasm.zip
+	( cd libs/openscad-wasm && unzip -o ../openscad-wasm.zip )
 	
 public/openscad.js: libs/openscad-wasm libs/openscad-wasm/openscad.js
 	ln -sf libs/openscad-wasm/openscad.js public/openscad.js
