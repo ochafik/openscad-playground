@@ -55,7 +55,11 @@ interface CommandQueueBackend {
 const COMMAND_TTL_MS = 60_000;
 const SWEEP_INTERVAL_MS = 30_000;
 const POLL_BATCH_WAIT_MS = 200;
-const LONG_POLL_TIMEOUT_MS = 20_000;
+// On serverless (Vercel), long-polling blocks the container and prevents
+// other requests (create, interact) from hitting the same warm instance.
+// Use a short timeout so containers are freed quickly.
+const IS_SERVERLESS = !!process.env.VERCEL || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+const LONG_POLL_TIMEOUT_MS = IS_SERVERLESS ? 500 : 20_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 // ─── InMemoryBackend ────────────────────────────────────────────────────
