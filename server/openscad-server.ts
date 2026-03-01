@@ -322,9 +322,6 @@ function buildAppHtml(baseUrl: string): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="openscad-base-url" content="${base}">
-  <!-- base href resolves relative URLs in HTML (script src, link href);
-       the meta tag is read by JS (worker URLs, dynamic fetches) -->
-  <base href="${base}">
   <title>OpenSCAD Playground</title>
 
   <!-- No prefetch links: assets are fetched on-demand by the app -->
