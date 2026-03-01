@@ -324,7 +324,33 @@ function buildAppHtml(baseUrl: string): string {
   <meta name="openscad-base-url" content="${base}">
   <title>OpenSCAD Playground</title>
 
-  <!-- No prefetch links: assets are fetched on-demand by the app -->
+  <!-- Patch fetch/createObjectURL to handle blob: URLs in CSP-restricted sandboxes.
+       model-viewer uses fetch() to load models, but connect-src may block blob:/data: URLs.
+       We intercept createObjectURL to keep a Blob→URL map, then intercept fetch to serve
+       blob: URLs directly from the map without a network request. -->
+  <script>
+  (function() {
+    var blobMap = new Map();
+    var _createObjectURL = URL.createObjectURL.bind(URL);
+    var _revokeObjectURL = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = function(blob) {
+      var url = _createObjectURL(blob);
+      if (blob instanceof Blob) blobMap.set(url, blob);
+      return url;
+    };
+    URL.revokeObjectURL = function(url) {
+      blobMap.delete(url);
+      return _revokeObjectURL(url);
+    };
+    var _fetch = self.fetch;
+    self.fetch = function(url) {
+      if (typeof url === 'string' && url.startsWith('blob:') && blobMap.has(url)) {
+        return Promise.resolve(new Response(blobMap.get(url), { status: 200 }));
+      }
+      return _fetch.apply(self, arguments);
+    };
+  })();
+  </script>
 
   <script type="module" src="${base}model-viewer.min.js${cacheBust}" defer></script>
   <script src="${base}browserfs.min.js${cacheBust}" defer></script>
