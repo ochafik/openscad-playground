@@ -154,7 +154,9 @@ export default function ViewerPanel({className, style}: {className?: string, sty
         const newIndex = dist < euclEps && radDist < radEps ? (currentIndex + 1) % PREDEFINED_ORBITS.length : currentIndex;
         const [name, theta, phi] = PREDEFINED_ORBITS[newIndex];
         Object.assign(modelOrbit, {theta, phi});
-        const newOrbit = modelViewerRef.current.cameraOrbit = axesViewerRef.current.cameraOrbit = modelOrbit.toString();
+        modelViewerRef.current.cameraOrbit = modelOrbit.toString();
+        // Sync axes viewer angles only — keep axes radius as 'auto' to prevent arrow clipping
+        axesViewerRef.current.cameraOrbit = `${modelOrbit.theta}rad ${modelOrbit.phi}rad auto`;
         toastRef.current?.show({severity: 'info', detail: `${name} view`, life: 1000,});
         setInteractionPrompt('none');
       }
