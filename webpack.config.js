@@ -2,6 +2,7 @@ import CopyPlugin from 'copy-webpack-plugin';
 import webpack from 'webpack';
 import WorkboxPlugin from 'workbox-webpack-plugin';
 
+import fs from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -10,6 +11,69 @@ const __dirname = dirname(__filename);
 
 const isDev = process.env.NODE_ENV !== 'production';
 
+// Check if the asm.js variant has been built
+const hasAsmJs = fs.existsSync(path.resolve(__dirname, 'src/asmjs/openscad.js'));
+
+// Shared worker webpack config factory
+function makeWorkerConfig({ entry, filename }) {
+  return {
+    entry,
+    output: {
+      filename,
+      path: path.resolve(__dirname, 'dist'),
+      globalObject: 'self',
+    },
+    devtool: isDev ? 'source-map' : 'nosources-source-map',
+    mode: 'production',
+    target: 'webworker',
+    module: {
+      rules: [
+        {
+          test: /\.tsx?$/,
+          use: {
+            loader: 'ts-loader',
+            options: {
+              transpileOnly: true,
+              compilerOptions: {
+                module: 'esnext',
+                moduleResolution: 'node',
+                target: 'ES2022',
+                lib: ['WebWorker', 'ES2022'],
+                sourceMap: isDev,
+                inlineSources: isDev
+              }
+            }
+          },
+          exclude: /node_modules/,
+        },
+        {
+          test: /\.wasm$/,
+          type: 'asset/resource'
+        }
+      ]
+    },
+    resolve: {
+      extensions: ['.tsx', '.ts', '.js', '.mjs', '.wasm'],
+      modules: [
+        path.resolve(__dirname, 'src'),
+        'node_modules'
+      ],
+      fallback: {
+        fs: false,
+        path: false,
+        module: false
+      }
+    },
+    externals: {
+      'browserfs': 'BrowserFS'
+    },
+    plugins: [
+      new webpack.EnvironmentPlugin({
+        'process.env.NODE_ENV': 'development',
+      }),
+    ],
+  };
+}
 
 /** @type {import('webpack').Configuration[]} */
 const config = [
@@ -120,70 +184,19 @@ const config = [
       }),
     ],
   },
-  {
+  // WASM worker (always built)
+  makeWorkerConfig({
     entry: './src/runner/openscad-worker.ts',
-    output: {
-      filename: 'openscad-worker.js',
-      path: path.resolve(__dirname, 'dist'),
-      globalObject: 'self',
-      // library: {
-      //   type: 'module'
-      // }
-    },
-    devtool: isDev ? 'source-map' : 'nosources-source-map',
-    mode: 'production',
-    // mode: isDev ? 'development' : 'production',
-    target: 'webworker',
-    // experiments: {
-    //   outputModule: true,
-    // },
-    module: {
-      rules: [
-        {
-          test: /\.tsx?$/,
-          use: {
-            loader: 'ts-loader',
-            options: {
-              transpileOnly: true,
-              compilerOptions: {
-                module: 'esnext',
-                moduleResolution: 'node',
-                target: 'ES2022',
-                lib: ['WebWorker', 'ES2022'],
-                sourceMap: isDev,
-                inlineSources: isDev
-              }
-            }
-          },
-          exclude: /node_modules/,
-        },
-        {
-          test: /\.wasm$/,
-          type: 'asset/resource'
-        }
-      ]
-    },
-    resolve: {
-      extensions: ['.tsx', '.ts', '.js', '.mjs', '.wasm'],
-      modules: [
-        path.resolve(__dirname, 'src'),
-        'node_modules'
-      ],
-      fallback: {
-        fs: false,
-        path: false,
-        module: false
-      }
-    },
-    externals: {
-      'browserfs': 'BrowserFS'
-    },
-    plugins: [
-      new webpack.EnvironmentPlugin({
-        'process.env.NODE_ENV': 'development',
-      }),
-    ],
-  },
+    filename: 'openscad-worker.js',
+  }),
+
+  // asm.js worker (only built if src/asmjs/openscad.js exists)
+  ...(hasAsmJs ? [
+    makeWorkerConfig({
+      entry: './src/runner/openscad-worker-asmjs.ts',
+      filename: 'openscad-worker-asmjs.js',
+    }),
+  ] : []),
 ];
 
 export default config;
