@@ -2,18 +2,16 @@
 
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import {App} from './components/App.tsx';
+import { McpApp } from './components/McpApp.tsx';
 import { createEditorFS } from './fs/filesystem.ts';
-import { registerOpenSCADLanguage } from './language/openscad-register-language.ts';
 import { zipArchives } from './fs/zip-archives.ts';
-import {readStateFromFragment} from './state/fragment-state.ts'
 import { createInitialState } from './state/initial-state.ts';
 import './index.css';
 
 import debug from 'debug';
 import { isInStandaloneMode, registerCustomAppHeightCSSProperty } from './utils.ts';
 import { State, StatePersister } from './state/app-state.ts';
-import { writeStateInFragment } from "./state/fragment-state.ts";
+import { isMcpMode, McpAppClient } from './state/mcp-app.ts';
 
 import "primereact/resources/themes/lara-light-indigo/theme.css";
 import "primereact/resources/primereact.min.css";
@@ -33,8 +31,10 @@ declare var BrowserFS: BrowserFSInterface
 
 
 window.addEventListener('load', async () => {
-  //*
-  if (process.env.NODE_ENV === 'production') {
+  const mcpMode = isMcpMode();
+
+  // Skip service worker in MCP mode (we're in an iframe loading from the host)
+  if (!mcpMode && process.env.NODE_ENV === 'production') {
     if ('serviceWorker' in navigator) {
         try {
             const registration = await navigator.serviceWorker.register('./sw.js');
@@ -57,11 +57,67 @@ window.addEventListener('load', async () => {
         }
     }
   }
-  //*/
-  
+
   registerCustomAppHeightCSSProperty();
 
-  const fs = await createEditorFS({prefix: '/libraries/', allowPersistence: isInStandaloneMode()});
+  // ─── MCP: connect early so resource loader is set before FS init ─
+  let mcpClient: McpAppClient | undefined;
+  if (mcpMode) {
+    console.log('[MCP] Detected MCP mode (running in iframe)');
+    const ribbon = document.querySelector('.github-fork-ribbon');
+    if (ribbon) (ribbon as HTMLElement).style.display = 'none';
+
+    mcpClient = new McpAppClient(window.parent);
+    try {
+      await mcpClient.connect();
+      console.log('[MCP] Connected to host');
+    } catch (err) {
+      console.error('[MCP] Failed to connect to host:', err);
+      mcpClient = undefined; // fall back to standalone
+    }
+  }
+
+  console.log('[init] Creating editor FS...');
+  // In MCP mode, skip loading 21 library ZIPs on the main thread — workers load them independently.
+  const fs = await createEditorFS({prefix: '/libraries/', allowPersistence: !mcpMode && isInStandaloneMode(), skipLibraries: mcpMode});
+  console.log('[init] Editor FS created');
+
+  const root = ReactDOM.createRoot(
+    document.getElementById('root') as HTMLElement
+  );
+
+  if (mcpMode && mcpClient) {
+    // ─── MCP App mode ──────────────────────────────────────────────
+    const statePersister: StatePersister = { set: async () => {} };
+    const initialState = createInitialState(null, { content: '' });
+
+    root.render(
+      <React.StrictMode>
+        <McpApp
+          initialState={initialState}
+          statePersister={statePersister}
+          fs={fs}
+          mcpClient={mcpClient}
+        />
+      </React.StrictMode>
+    );
+  } else {
+    // ─── Standalone mode ───────────────────────────────────────────
+    renderStandalone(fs, root);
+  }
+});
+
+async function renderStandalone(fs: FS, root: ReactDOM.Root) {
+  // Dynamic imports to keep Monaco/editor out of the MCP bundle
+  const [
+    { App },
+    { registerOpenSCADLanguage },
+    { readStateFromFragment, writeStateInFragment },
+  ] = await Promise.all([
+    import('./components/App.tsx'),
+    import('./language/openscad-register-language.ts'),
+    import('./state/fragment-state.ts'),
+  ]);
 
   await registerOpenSCADLanguage(fs, '/', zipArchives);
 
@@ -69,17 +125,17 @@ window.addEventListener('load', async () => {
   let persistedState: State | null = null;
 
   if (isInStandaloneMode()) {
-    const fs: FS = BrowserFS.BFSRequire('fs')
+    const bfs: FS = (globalThis as any).BrowserFS.BFSRequire('fs');
     try {
-      const data = JSON.parse(new TextDecoder("utf-8").decode(fs.readFileSync('/state.json')));
-      const {view, params} = data
+      const data = JSON.parse(new TextDecoder("utf-8").decode(bfs.readFileSync('/state.json')));
+      const {view, params} = data;
       persistedState = {view, params};
     } catch (e) {
-      console.log('Failed to read the persisted state from local storage.', e)
+      console.log('Failed to read the persisted state from local storage.', e);
     }
     statePersister = {
       set: async ({view, params}) => {
-        fs.writeFile('/state.json', JSON.stringify({view, params}));
+        bfs.writeFile('/state.json', JSON.stringify({view, params}));
       }
     };
   } else {
@@ -91,14 +147,9 @@ window.addEventListener('load', async () => {
 
   const initialState = createInitialState(persistedState);
 
-  const root = ReactDOM.createRoot(
-    document.getElementById('root') as HTMLElement
-  );
   root.render(
     <React.StrictMode>
       <App initialState={initialState} statePersister={statePersister} fs={fs} />
     </React.StrictMode>
   );
-});
-
-
+}
