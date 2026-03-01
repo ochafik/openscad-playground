@@ -12,7 +12,7 @@ WASM_BUILD=Release
 
 all: public
 
-.PHONY: public wasm
+.PHONY: public wasm asmjs
 public: \
 		src/wasm \
 		public/openscad.js \
@@ -43,7 +43,7 @@ clean:
 	rm -fR libs build
 	rm -fR public/openscad.{js,wasm}
 	rm -fR public/libraries/*.zip
-	rm -fR src/wasm
+	rm -fR src/wasm src/asmjs
 
 dist/index.js: public
 	npm run build
@@ -60,6 +60,21 @@ wasm: libs/openscad
 	( cd libs/openscad && ./scripts/wasm-base-docker-run.sh /bin/bash -c "cmake --build build -j || cmake --build build -j2 || cmake --build build" )
 	mkdir -p libs/openscad-wasm
 	cp libs/openscad/build/openscad.* libs/openscad-wasm/
+
+# Build the asm.js variant (optional fallback for environments without WebAssembly)
+# This produces a larger (~2-3x) and slower (~5-10x) build, but works in older browsers.
+asmjs: libs/openscad
+	( cd libs/openscad && ./scripts/wasm-base-docker-run.sh emcmake cmake -B build-asmjs \
+		-DCMAKE_BUILD_TYPE=$(WASM_BUILD) \
+		-DEXPERIMENTAL=1 \
+		-DCMAKE_EXE_LINKER_FLAGS="-sWASM=0" )
+	( cd libs/openscad && ./scripts/wasm-base-docker-run.sh /bin/bash -c "cmake --build build-asmjs -j || cmake --build build-asmjs -j2 || cmake --build build-asmjs" )
+	mkdir -p libs/openscad-asmjs
+	cp libs/openscad/build-asmjs/openscad.js libs/openscad-asmjs/
+
+src/asmjs: libs/openscad-asmjs
+	rm -f src/asmjs
+	ln -sf "$(shell pwd)/libs/openscad-asmjs" src/asmjs
 
 libs/openscad-wasm:
 	mkdir -p libs/openscad-wasm
