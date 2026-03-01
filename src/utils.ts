@@ -174,14 +174,5 @@ export async function fetchSource(fs: FS, {content, path, url}: Source, loader?:
 }
 
 export function readFileAsDataURL(file: File) {
-  // TO data URI:
-  return new Promise<string>((res, rej) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      res(reader.result as string);
-    }
-    reader.onerror = rej;
-    reader.readAsDataURL(file);
-  });
-  // return URL.createObjectURL(file);
+  return Promise.resolve(URL.createObjectURL(file));
 }
