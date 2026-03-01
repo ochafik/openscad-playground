@@ -7,3 +7,5 @@ public/openscad.wasm
 src/wasm
 package-lock.json
 .DS_Store
+.vercel
+api/_server.js

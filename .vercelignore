@@ -1,0 +1,5 @@
+node_modules
+server/node_modules
+.git
+src/asmjs
+*.wasm.map
