@@ -1,5 +1,9 @@
 node_modules
 server/node_modules
+server/dist
 .git
 src/asmjs
+libs
+public
+examples
 *.wasm.map
