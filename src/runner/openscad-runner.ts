@@ -3,12 +3,15 @@
 import { MergedOutputs } from "./openscad-worker.ts";
 import { AbortablePromise } from "../utils.ts";
 import { Source } from "../state/app-state.ts";
+import { getForcedEngine, type RenderEngine } from "./wasm-support.ts";
 
 export type OpenSCADInvocation = {
   mountArchives: boolean,
   inputs?: Source[],
   args: string[],
   outputPaths?: string[],
+  // Testing override: pin the engine instead of auto-detecting (see ?wasmEngine).
+  forceEngine?: RenderEngine,
 }
 
 export type OpenSCADInvocationResults = {
@@ -17,6 +20,9 @@ export type OpenSCADInvocationResults = {
   outputs?: [string, string][],
   mergedOutputs: MergedOutputs,
   elapsedMillis: number,
+  // Which engine ran this invocation (the WASM build or the wasm2js fallback);
+  // undefined if the invocation failed before an engine could be loaded.
+  engine?: RenderEngine,
 };
 
 export type ProcessStreams = {stderr: string} | {stdout: string}
@@ -48,7 +54,9 @@ export function spawnOpenSCAD(
         streamsCallback(e.data);
       }
     }
-    worker.postMessage(invocation)
+    // Forward the optional ?wasmEngine= testing override to the worker (its own
+    // location has no query string, so it cannot read the parameter itself).
+    worker.postMessage({ ...invocation, forceEngine: invocation.forceEngine ?? getForcedEngine() })
     
     return () => {
       terminate();

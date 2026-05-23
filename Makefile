@@ -3,6 +3,13 @@ WASM_BUILD_URL=https://files.openscad.org/playground/OpenSCAD-2025.03.25.wasm244
 # WASM_SNAPSHOT_JS_URL=https://files.openscad.org/snapshots/.snapshot_wasm.js
 # WASM_BUILD_URL=$(shell curl ${WASM_SNAPSHOT_JS_URL} 2>/dev/null | grep https | sed -E "s/.*(https:[^']+)'.*/\1/" )
 
+# Optional pure-JavaScript (wasm2js) OpenSCAD build, used on devices where
+# WebAssembly is disabled (iOS Lockdown Mode, strict CSP, locked-down browsers).
+# Point this at a hosted wasm2js build to ship the fallback; when left empty the
+# playground still runs but shows a clear message on such devices.
+# Run `make wasm-fallback` to build the artifact locally (see docs/WASM_FALLBACK.md).
+WASM_FALLBACK_BUILD_URL ?=
+
 SINGLE_BRANCH_MAIN=--branch main --single-branch
 SINGLE_BRANCH=--branch master --single-branch
 SHALLOW=--depth 1
@@ -12,7 +19,7 @@ WASM_BUILD=Release
 
 all: public
 
-.PHONY: public wasm
+.PHONY: public wasm wasm-fallback
 public: \
 		src/wasm \
 		public/openscad.js \
@@ -41,7 +48,7 @@ public: \
 
 clean:
 	rm -fR libs build
-	rm -fR public/openscad.{js,wasm}
+	rm -fR public/openscad.{js,wasm,fallback.js}
 	rm -fR public/libraries/*.zip
 	rm -fR src/wasm
 
@@ -65,7 +72,22 @@ libs/openscad-wasm:
 	mkdir -p libs/openscad-wasm
 	wget ${WASM_BUILD_URL} -O libs/openscad-wasm.zip
 	( cd libs/openscad-wasm && unzip ../openscad-wasm.zip )
-	
+
+# --- Optional wasm2js (pure-JavaScript) fallback build ----------------------
+# Built into the deployment only when WASM_FALLBACK_BUILD_URL is set; otherwise
+# the playground degrades gracefully (see src/components/WasmStatusBanner.tsx).
+ifneq ($(strip $(WASM_FALLBACK_BUILD_URL)),)
+public: public/openscad.fallback.js
+endif
+
+public/openscad.fallback.js:
+	@test -n "$(WASM_FALLBACK_BUILD_URL)" || { echo "Set WASM_FALLBACK_BUILD_URL, or run 'make wasm-fallback' (see docs/WASM_FALLBACK.md)"; exit 1; }
+	wget "$(WASM_FALLBACK_BUILD_URL)" -O $@.tmp && mv $@.tmp $@
+
+# Build the wasm2js fallback locally (requires Docker). Writes public/openscad.fallback.js.
+wasm-fallback:
+	./scripts/build-wasm-fallback.sh
+
 public/openscad.js: libs/openscad-wasm libs/openscad-wasm/openscad.js
 	ln -sf libs/openscad-wasm/openscad.js public/openscad.js
 		

@@ -114,6 +114,25 @@ rm -fR ../ochafik.github.io/openscad2 && cp -R dist ../ochafik.github.io/opensca
   npm start
   ```
 
+## WebAssembly fallback (devices where WASM is disabled)
+
+On some devices WebAssembly is disabled (iOS/macOS Lockdown Mode, a strict
+Content-Security-Policy, locked-down enterprise browsers). The playground
+detects this at runtime: it loads an optional pure-JavaScript (wasm2js) OpenSCAD
+build when WASM is unavailable, and otherwise shows a clear message instead of
+failing silently.
+
+The JS fallback build is large and slower, so it ships only if you provide it:
+
+```bash
+make wasm-fallback        # build openscad.fallback.js locally (needs Docker)
+# ...or fetch a hosted one:
+WASM_FALLBACK_BUILD_URL=https://example.com/openscad.fallback.js make public
+```
+
+See [docs/WASM_FALLBACK.md](./docs/WASM_FALLBACK.md) for the full design,
+trade-offs, and build recipe.
+
 ## Adding OpenSCAD libraries
 
 You'll need to update 3 files (search for BOSL2 for an example):

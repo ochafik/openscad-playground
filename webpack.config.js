@@ -73,6 +73,10 @@ module.exports = [
               /(^|\/)\./,
               /\.map$/,
               /^manifest.*\.js$/,
+              // The wasm2js fallback build is large (~25-35MB) and only needed
+              // on devices where WebAssembly is disabled. Keep it out of the
+              // precache manifest; it is still runtime-cached on demand.
+              /openscad\.fallback\.js$/,
             ],
             // these options encourage the ServiceWorkers to get in there fast     
             // and not allow any straggling "old" SWs to hang around     
