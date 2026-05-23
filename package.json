@@ -30,7 +30,7 @@
     "start:development": "npx webpack serve --mode=development",
     "start:production": "NODE_ENV=production PUBLIC_URL=http://localhost:3000/dist/ npm run build && npx serve",
     "start": "npm run start:development",
-    "build": "NODE_ENV=production webpack --mode=production"
+    "build": "rm -rf dist && NODE_ENV=production NODE_OPTIONS=--max-old-space-size=8192 webpack --mode=production"
   },
   "eslintConfig": {
     "extends": [
