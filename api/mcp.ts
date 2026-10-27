@@ -1,8 +1,12 @@
 /**
  * Vercel serverless function for the MCP endpoint.
  *
- * Imports from api/_server.mjs which is pre-bundled by esbuild during
+ * Imports from api/_server.js which is pre-bundled by esbuild during
  * the Vercel build step (includes all MCP SDK + server deps).
+ *
+ * The server is stateless — all viewer interaction happens through app
+ * tools the view registers with the host — so each invocation creates a
+ * fresh server + transport pair.
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
@@ -19,10 +23,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const { createServer, StreamableHTTPServerTransport } = require("./_server.js");
+    const { createServer, NodeStreamableHTTPServerTransport } = require("./_server.js");
 
     const server = createServer();
-    const transport = new StreamableHTTPServerTransport({
+    const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
 

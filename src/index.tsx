@@ -11,7 +11,8 @@ import './index.css';
 import debug from 'debug';
 import { isInStandaloneMode, registerCustomAppHeightCSSProperty } from './utils.ts';
 import { State, StatePersister } from './state/app-state.ts';
-import { isMcpMode, McpAppClient } from './state/mcp-app.ts';
+import { isMcpMode, createMcpApp, bufferToolEvents, ToolEventBuffer } from './state/mcp-app.ts';
+import type { App as McpApp_App } from '@modelcontextprotocol/ext-apps';
 
 import "primereact/resources/themes/lara-light-indigo/theme.css";
 import "primereact/resources/primereact.min.css";
@@ -61,19 +62,25 @@ window.addEventListener('load', async () => {
   registerCustomAppHeightCSSProperty();
 
   // ─── MCP: connect early so resource loader is set before FS init ─
-  let mcpClient: McpAppClient | undefined;
+  // The App's tool surface (the `interact` tool) is declared during the
+  // ui/initialize handshake, so createMcpApp() registers it before connect().
+  // Tool input/result notifications that arrive before React mounts are
+  // buffered and replayed by the McpApp component.
+  let mcpApp: McpApp_App | undefined;
+  let toolEvents: ToolEventBuffer | undefined;
   if (mcpMode) {
     console.log('[MCP] Detected MCP mode (running in iframe)');
     const ribbon = document.querySelector('.github-fork-ribbon');
     if (ribbon) (ribbon as HTMLElement).style.display = 'none';
 
-    mcpClient = new McpAppClient(window.parent);
+    mcpApp = createMcpApp();
+    toolEvents = bufferToolEvents(mcpApp);
     try {
-      await mcpClient.connect();
+      await mcpApp.connect();
       console.log('[MCP] Connected to host');
     } catch (err) {
       console.error('[MCP] Failed to connect to host:', err);
-      mcpClient = undefined; // fall back to standalone
+      mcpApp = undefined; // fall back to standalone
     }
   }
 
@@ -86,7 +93,7 @@ window.addEventListener('load', async () => {
     document.getElementById('root') as HTMLElement
   );
 
-  if (mcpMode && mcpClient) {
+  if (mcpMode && mcpApp && toolEvents) {
     // ─── MCP App mode ──────────────────────────────────────────────
     const statePersister: StatePersister = { set: async () => {} };
     const initialState = createInitialState(null, { content: '' });
@@ -97,7 +104,8 @@ window.addEventListener('load', async () => {
           initialState={initialState}
           statePersister={statePersister}
           fs={fs}
-          mcpClient={mcpClient}
+          app={mcpApp}
+          toolEvents={toolEvents}
         />
       </React.StrictMode>
     );

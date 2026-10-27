@@ -2,6 +2,8 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that exposes an interactive OpenSCAD 3D viewer as an [MCP App](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/apps). It lets LLMs create, edit, and render OpenSCAD models through tool calls, while users see a live 3D preview in the host UI.
 
+Built with the [MCP Apps SDK](https://github.com/modelcontextprotocol/ext-apps) v2: the server exposes a single `create` tool that opens the viewer, and the viewer itself registers an `interact` app tool with the host. The host routes `interact` calls straight into the iframe, so the server is fully stateless — no command queue, no polling, no Redis.
+
 ## Quick Start
 
 ```bash
@@ -29,7 +31,7 @@ npm start
 # or: npm run start:http
 ```
 
-Listens on `http://0.0.0.0:<PORT>/mcp` (default port: 3001). Use this when connecting from MCP hosts that support HTTP-based transports (e.g., Claude Desktop with remote servers, basic-host).
+Listens on `http://localhost:<PORT>/mcp` (default port: 3001). Use this when connecting from MCP hosts that support HTTP-based transports (e.g., Claude Desktop with remote servers, basic-host).
 
 ### Stdio
 
@@ -102,7 +104,7 @@ By default, the app's HTML loads JS/WASM/CSS from the public deployment at `http
 ```bash
 # Make sure the client is built first
 cd /path/to/openscad-playground
-make public && npm install && npm run build
+npm install && npm run build:all
 
 # Start server with self-serve
 cd server
@@ -115,10 +117,9 @@ This adds `express.static` serving of the `dist/` directory and points the app's
 
 ### Vercel
 
-The repo root has a `vercel.json` that deploys both the **web app** (static files from `dist/`) and the **MCP endpoint** (serverless function at `/mcp`) from the same project.
+The repo root has a `vercel.json` that deploys both the **web app** (static files from `dist/`) and the **MCP endpoint** (serverless function at `/mcp`) from the same project. The server is stateless, so serverless deployment needs no shared storage.
 
 1. Set environment variables in your Vercel project:
-   - `REDIS_URL` — e.g. an [Upstash Redis](https://upstash.com/) URL (required for serverless — each invocation is stateless)
    - `OPENSCAD_BASE_URL` — set to your Vercel deployment URL (e.g. `https://openscad.vercel.app/`)
 
 2. Deploy from the repo root:
@@ -136,7 +137,7 @@ The CSP headers automatically include the `OPENSCAD_BASE_URL` origin in `resourc
 
 The server is a standard Node.js/Express app. Deploy `server/` with:
 - `npm install && npm start` as the start command
-- Set `PORT`, `REDIS_URL`, and `OPENSCAD_BASE_URL` environment variables
+- Set `PORT` and `OPENSCAD_BASE_URL` environment variables
 
 ## Environment Variables
 
@@ -148,52 +149,60 @@ The server is a standard Node.js/Express app. Deploy `server/` with:
 | `OPENSCAD_DIST_DIR` | `../dist` (relative to server/) | Path to the built dist/ directory (for `--serve-dist`) |
 | `OPENSCAD_SERVE_DIST` | _(unset)_ | Set to any value to enable static file serving (alternative to `--serve-dist` flag) |
 | `ASSET_PORT` | `0` (auto) | Port for the stdio-mode asset server (only used with `--stdio --serve-dist`) |
-| `REDIS_URL` | _(unset)_ | Redis connection URL (e.g. `redis://localhost:6379`). When set, the command queue uses Redis instead of in-memory storage, enabling horizontal scaling across multiple server instances. |
 
 ## Tools
 
-### Model tools (visible to LLM)
+### Server tools
 
 | Tool | Description |
 |---|---|
-| `create` | Create a new OpenSCAD viewer. Accepts optional initial `source`, `vars`, and `camera`. Returns a `viewUUID` in `_meta`. |
-| `interact` | Send a command to a viewer. Uses an `action` enum with a flat schema of optional fields. All commands are fire-and-forget. |
+| `create` | Open the OpenSCAD viewer (an app tool bound to the `ui://openscad/viewer.html` resource). Accepts optional initial `source`, `vars`, and `camera`; echoes the applied values (defaults included) in `structuredContent`, which the view reads to initialize itself. |
+
+### App-registered tools
+
+The view registers these with the host during the `ui/initialize` handshake (see `src/state/mcp-app.ts`); the host routes calls straight into the iframe:
+
+| Tool | Description |
+|---|---|
+| `interact` | One tool for every viewer action, with an `action` enum plus a flat schema of per-action fields, and an optional `commands` array for sequential batching (content[i] is the result of commands[i]). |
 
 **`interact` actions:**
 
 | Action | Required fields | Description |
 |---|---|---|
 | `write_source` | `content` | Replace entire source code |
-| `edit_source` | `old_text`, `new_text` | Find-and-replace in source |
-| `read_source` | _(none)_ | Trigger a model context refresh with current state |
+| `edit_source` | `old_text`, `new_text` | Find-and-replace in source (errors if `old_text` is absent) |
 | `set_camera` | `view` or `theta`+`phi` | Set camera angle (preset name or custom radians) |
 | `set_var` | `name`, `value` | Set a single customizer variable |
 | `set_vars` | `vars` | Set multiple customizer variables at once |
 | `render` | _(none)_ | Trigger a full (non-preview) render |
+| `zoom` | `factor` | Zoom by factor (<1 = zoom in, >1 = zoom out) |
+| `auto_fit` | _(none)_ | Reset zoom to fit the model in view |
+| `get_screenshot` | _(none)_ | Capture the current view as a PNG image |
+| `get_state` | _(none)_ | Read source, errors, warnings, customizer params and camera |
 
-### Internal tools (app-only, invisible to LLM)
-
-| Tool | Description |
-|---|---|
-| `poll_commands` | App polls for pending commands from the command queue. |
+Source/variable mutations return the checker's errors and warnings directly in the tool result, so the model gets immediate feedback without a round-trip through `get_state`.
 
 ## Architecture
 
 ```
-┌─────────────┐   openscad_create    ┌──────────────────┐     postMessage     ┌──────────────┐
-│   LLM / AI  │   openscad_interact  │   MCP Server     │ ◀─────────────────▶ │  App (iframe) │
-│   (model)   │ ──────────────────▶  │   command queue   │                     │  3D viewer    │
-└─────────────┘   fire-and-forget    └──────────────────┘                     └──────────────┘
-       ▲                                    ▲                                        │
-       │  model context                     │  poll_openscad_commands                │
-       └────────────────────────────────────┴────────────────────────────────────────┘
+┌─────────────┐        create        ┌──────────────────┐
+│   LLM / AI  │ ───────────────────▶ │   MCP Server     │  (stateless)
+│   (model)   │                      │  create + UI res │
+└─────────────┘                      └──────────────────┘
+       │                                       │ serves ui://openscad/viewer.html
+       │  interact (routed by host)            ▼
+       │                              ┌──────────────────┐
+       └────────────────────────────▶ │   App (iframe)   │
+       ▲                              │ 3D viewer+editor │
+       │  tool results, model context └──────────────────┘
+       └───────────────────────────────────────┘
 ```
 
-1. LLM calls `create` — server returns a `viewUUID` and optionally enqueues initial commands
-2. LLM calls `interact` — commands are enqueued (fire-and-forget, returns immediately)
-3. The app (running in the host's iframe) polls `poll_commands` every 300ms
-4. App processes each command (updates source, renders, etc.)
-5. App updates the model context with a screenshot and current state (source, errors, params)
+1. LLM calls `create` — the host opens the viewer resource; the view reads the initial source/vars/camera from the tool's input and result
+2. The view registers `interact` during its `ui/initialize` handshake
+3. LLM calls `interact` — the host routes the call into the iframe, which applies it and answers with results (including screenshots) directly
+4. The view also pushes passive state changes (user edits in the customizer, render status) into the model context via `updateModelContext`
 
 ## Testing
 
@@ -202,28 +211,13 @@ cd server
 npm test
 ```
 
-Runs the E2E test suite that exercises all tools via the MCP SDK client over Streamable HTTP. Tests cover:
-- Tool and resource listing (verifies new tools, confirms old tools removed)
-- `create` (basic + with initial state)
-- `interact` with all actions (write, edit, read, camera, vars, render)
-- Command batching (multiple commands in one poll)
-- Input validation (missing required fields)
-- Error handling (unknown viewUUID, empty queue)
+Runs an in-process test suite over linked in-memory transports, covering the tool/resource surface: `create` registration and `_meta.ui.resourceUri` binding, default application and echo, input validation, and the UI resource's HTML + CSP metadata.
+
+The `interact` tool lives in the view, so it is exercised in a browser host (e.g. basic-host), not here.
 
 ## asm.js Fallback (Optional)
 
-The app uses WebAssembly by default. For environments without WASM support, an optional asm.js variant can be built:
-
-```bash
-# From the project root (requires Docker for emscripten)
-make asmjs
-make src/asmjs   # creates symlink
-
-# Rebuild the client (webpack auto-detects src/asmjs/)
-npm run build
-```
-
-This produces `openscad-worker-asmjs.js` alongside the regular `openscad-worker.js`. At runtime, the app detects WebAssembly support and automatically falls back to the asm.js worker if available.
+The app uses WebAssembly by default. For environments without WASM support, an optional asm.js variant can be built; if `src/asmjs/openscad.js` exists, webpack automatically builds `openscad-worker-asmjs.js` alongside the regular `openscad-worker.js`. At runtime, the app detects WebAssembly support and automatically falls back to the asm.js worker if available.
 
 **Trade-offs:**
 - asm.js binary is ~2-3x larger than WASM
@@ -235,7 +229,7 @@ This produces `openscad-worker-asmjs.js` alongside the regular `openscad-worker.
 ```bash
 cd server
 npm run dev          # Same as npm start, for development
-npm test             # Run E2E tests
+npm test             # Run the server tests
 ```
 
 The server uses `tsx` for direct TypeScript execution — no build step needed for the server itself. The client-side code requires `npm run build` (webpack) from the project root.

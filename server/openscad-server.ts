@@ -1,29 +1,54 @@
+/**
+ * OpenSCAD Playground MCP Server
+ *
+ * An MCP server that opens the OpenSCAD playground as an interactive
+ * MCP App (3D viewer + customizer) inside the host's iframe.
+ *
+ * Tools:
+ * - create: opens the viewer with initial source / customizer vars / camera.
+ *
+ * All follow-up interaction goes through the `interact` tool that the view
+ * itself registers with the host once it loads (see src/state/mcp-app.ts):
+ * the host routes those calls straight into the iframe, so the server needs
+ * no command queue, polling, or shared state — it works stateless, including
+ * on serverless deployments.
+ */
+
 import {
   registerAppResource,
   registerAppTool,
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult, ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
 import {
-  ACTIONS,
-  createQueue,
-  dequeueCommands,
-  enqueueCommand,
-  hasQueue,
-  submitResult,
-  waitForCommands,
-  waitForResult,
-  type OpenSCADCommand,
-} from "./command-queue.js";
+  McpServer,
+  type CallToolResult,
+  type ReadResourceResult,
+} from "@modelcontextprotocol/server";
+import { z } from "zod";
 
-const BASE_URL = process.env.OPENSCAD_BASE_URL ?? "https://ochafik.com/openscad2/";
-const RESOURCE_URI = "ui://openscad/viewer.html";
+// Read at call time, not module load: stdio --serve-dist sets
+// OPENSCAD_BASE_URL only once its asset server knows its port (index.ts).
+function getBaseUrl(): string {
+  return process.env.OPENSCAD_BASE_URL ?? "https://ochafik.com/openscad2/";
+}
+
+export const RESOURCE_URI = "ui://openscad/viewer.html";
+
+// Must stay in sync with CAMERA_VIEWS in src/state/mcp-app.ts (the view's
+// set_camera enum) and the preset names in ViewerPanel.tsx's PREDEFINED_ORBITS.
+export const CAMERA_VIEWS = [
+  "diagonal",
+  "front",
+  "right",
+  "back",
+  "left",
+  "top",
+  "bottom",
+] as const;
 
 // ─── Default source for the create tool ─────────────────────────────────
 
-const DEFAULT_SOURCE = `// Parametric rounded box — try the customizer!
+export const DEFAULT_SOURCE = `// Parametric rounded box — try the customizer!
 
 /* [Dimensions] */
 width = 30;   // [10:100]
@@ -48,264 +73,103 @@ difference() {
     }
 }`;
 
-// ─── Helpers ────────────────────────────────────────────────────────────
-
-function buildCommand(args: Record<string, unknown>): { value?: OpenSCADCommand; error?: CallToolResult } {
-  const action = args.action as string;
-  switch (action) {
-    case "write_source":
-      if (!args.content) return { error: errResult("Missing required field: content") };
-      return { value: { type: "write_source", content: args.content as string } };
-    case "edit_source":
-      if (!args.old_text || args.new_text === undefined) return { error: errResult("Missing required fields: old_text, new_text") };
-      return { value: { type: "edit_source", old_text: args.old_text as string, new_text: args.new_text as string } };
-    case "read_source":
-      return { value: { type: "read_source" } };
-    case "set_camera":
-      return { value: { type: "set_camera", view: args.view as string | undefined, theta: args.theta as number | undefined, phi: args.phi as number | undefined } };
-    case "set_var":
-      if (!args.name) return { error: errResult("Missing required field: name") };
-      return { value: { type: "set_var", name: args.name as string, value: args.value } };
-    case "set_vars":
-      if (!args.vars) return { error: errResult("Missing required field: vars") };
-      return { value: { type: "set_vars", vars: args.vars as Record<string, unknown> } };
-    case "render":
-      return { value: { type: "render" } };
-    case "zoom":
-      if (args.factor === undefined) return { error: errResult("Missing required field: factor") };
-      return { value: { type: "zoom", factor: args.factor as number } };
-    case "auto_fit":
-      return { value: { type: "auto_fit" } };
-    default:
-      return { error: errResult(`Unknown action: ${action}`) };
-  }
-}
-
-function errResult(text: string): CallToolResult {
-  return { content: [{ type: "text", text }], isError: true };
-}
-
 // ─── Server ─────────────────────────────────────────────────────────────
 
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "OpenSCAD Playground",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   // ─── Create tool (app tool — opens the viewer) ─────────────────────
 
-  registerAppTool(server, "create", {
-    title: "Create OpenSCAD Viewer",
-    description:
-      "Opens an interactive OpenSCAD 3D viewer. Returns a viewUUID for use with the interact tool. " +
-      "Optionally pass initial source code, customizer variables, and camera preset. " +
-      "If no source is provided, a default parametric model is shown.",
-    inputSchema: {
-      source: z.string().default(DEFAULT_SOURCE).describe("OpenSCAD source code (.scad)"),
-      vars: z.record(z.unknown()).optional().describe("Initial customizer variable values"),
-      camera: z.string().default("diagonal").describe(
-        'Camera preset: "diagonal", "front", "right", "back", "left", "top", "bottom"'
-      ),
-    },
-    _meta: { ui: { resourceUri: RESOURCE_URI } },
-  }, async ({ source, vars, camera }): Promise<CallToolResult> => {
-    const viewUUID = crypto.randomUUID();
-    await createQueue(viewUUID);
-
-    // Enqueue initial state commands so the app picks them up on first poll
-    await enqueueCommand(viewUUID, { type: "write_source", content: source });
-    if (vars) await enqueueCommand(viewUUID, { type: "set_vars", vars });
-    await enqueueCommand(viewUUID, { type: "set_camera", view: camera });
-
-    return {
-      content: [{
-        type: "text",
-        text: `OpenSCAD viewer created (viewUUID: ${viewUUID}). Use the interact tool to modify the model, change views, or capture screenshots.`,
-      }],
-      _meta: { viewUUID },
-    };
-  });
-
-  // ─── Interact tool (regular tool — visible to model) ────────────────
-
-  server.tool(
-    "interact",
-    "Send a command to an OpenSCAD viewer.\n\n" +
-    "Fire-and-forget actions (result appears in model context):\n" +
-    "- write_source: Replace source code entirely\n" +
-    "- edit_source: Find-and-replace within source (old_text → new_text)\n" +
-    "- read_source: Trigger a context update with current state\n" +
-    "- set_camera: Change camera angle (preset name, or theta/phi in radians)\n" +
-    "- set_var: Set one customizer parameter (name + value)\n" +
-    "- set_vars: Set multiple customizer parameters (vars object)\n" +
-    "- render: Full (non-preview) render\n" +
-    "- zoom: Zoom by factor (<1 = zoom in, >1 = zoom out, e.g. 0.5 doubles size)\n" +
-    "- auto_fit: Reset zoom to fit model in view\n\n" +
-    "Request-response actions (return data directly):\n" +
-    "- get_screenshot: Capture current view as image\n" +
-    "- get_state: Read current source, errors, warnings, and customizer state\n\n" +
-    "You can also pass a `commands` array to batch multiple fire-and-forget actions.",
+  registerAppTool(
+    server,
+    "create",
     {
-      viewUUID: z.string().describe("The viewer instance ID from create"),
-      action: z.enum(ACTIONS).optional().describe("The action to perform (required unless using commands array)"),
-      // write_source
-      content: z.string().optional().describe("New source code (for write_source)"),
-      // edit_source
-      old_text: z.string().optional().describe("Text to find (for edit_source)"),
-      new_text: z.string().optional().describe("Replacement text (for edit_source)"),
-      // set_camera
-      view: z.string().optional().describe(
-        'Camera preset name: "diagonal", "front", "right", "back", "left", "top", "bottom"'
-      ),
-      theta: z.number().optional().describe("Horizontal angle in radians (for set_camera)"),
-      phi: z.number().optional().describe("Vertical angle in radians (for set_camera)"),
-      // set_var
-      name: z.string().optional().describe("Variable name (for set_var)"),
-      value: z.unknown().optional().describe("Variable value (for set_var)"),
-      // set_vars
-      vars: z.record(z.unknown()).optional().describe("Map of variable names to values (for set_vars)"),
-      // zoom
-      factor: z.number().optional().describe("Zoom factor (<1 zooms in, >1 zooms out, e.g. 0.5 doubles size)"),
-      // batch
-      commands: z.array(z.object({
-        action: z.enum(ACTIONS),
-        content: z.string().optional(),
-        old_text: z.string().optional(),
-        new_text: z.string().optional(),
-        view: z.string().optional(),
-        theta: z.number().optional(),
-        phi: z.number().optional(),
-        name: z.string().optional(),
-        value: z.unknown().optional(),
-        vars: z.record(z.unknown()).optional(),
-        factor: z.number().optional(),
-      })).optional().describe("Batch of fire-and-forget commands to execute in order"),
+      title: "Create OpenSCAD Viewer",
+      description: `Open an interactive OpenSCAD 3D viewer and editor. Call this ONCE per model.
+
+**All follow-up actions go through the viewer's own \`interact\` tool**, which the app registers with the host once it loads — editing source, setting customizer variables, changing camera, rendering, zooming, capturing screenshots, reading state. Calling create again opens a SEPARATE viewer.
+
+Optionally pass initial OpenSCAD source code, customizer variable values, and a camera preset. With no source, a default parametric model is shown.`,
+      inputSchema: z.object({
+        source: z
+          .string()
+          .default(DEFAULT_SOURCE)
+          .describe("OpenSCAD source code (.scad)"),
+        vars: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Initial customizer variable values"),
+        camera: z
+          .enum(CAMERA_VIEWS)
+          .default("diagonal")
+          .describe("Camera preset"),
+      }),
+      outputSchema: z.object({
+        source: z.string().describe("The source the viewer opens with"),
+        camera: z.string(),
+        vars: z.record(z.string(), z.unknown()).optional(),
+      }),
+      _meta: { ui: { resourceUri: RESOURCE_URI } },
     },
-    async (args): Promise<CallToolResult> => {
-      const { viewUUID } = args;
-      if (!await hasQueue(viewUUID)) {
-        return errResult(`Unknown viewUUID: ${viewUUID}`);
-      }
-
-      // ── Batch mode ──
-      if (args.commands && args.commands.length > 0) {
-        for (const cmd of args.commands) {
-          const result = buildCommand(cmd as Record<string, unknown>);
-          if (result.error) return result.error;
-          await enqueueCommand(viewUUID, result.value!);
-        }
-        return {
-          content: [{ type: "text", text: `Queued ${args.commands.length} commands for ${viewUUID}.` }],
-        };
-      }
-
-      if (!args.action) {
-        return errResult("Either 'action' or 'commands' is required.");
-      }
-
-      // ── Request-response: get_screenshot ──
-      if (args.action === "get_screenshot") {
-        const requestId = crypto.randomUUID();
-        await enqueueCommand(viewUUID, { type: "get_screenshot", requestId });
-        try {
-          const result = await waitForResult(requestId) as { screenshot?: string };
-          if (result?.screenshot) {
-            const base64 = result.screenshot.includes(',')
-              ? result.screenshot.split(',')[1]
-              : result.screenshot;
-            return {
-              content: [
-                { type: "image", data: base64, mimeType: "image/png" },
-                { type: "text", text: "Screenshot captured." },
-              ],
-            };
-          }
-          return errResult("Screenshot capture failed: no image data.");
-        } catch (e) {
-          return errResult(`Screenshot failed: ${e instanceof Error ? e.message : e}`);
-        }
-      }
-
-      // ── Request-response: get_state ──
-      if (args.action === "get_state") {
-        const requestId = crypto.randomUUID();
-        await enqueueCommand(viewUUID, { type: "get_state", requestId });
-        try {
-          const state = await waitForResult(requestId) as Record<string, unknown>;
-          return {
-            content: [{ type: "text", text: JSON.stringify(state, null, 2) }],
-          };
-        } catch (e) {
-          return errResult(`get_state failed: ${e instanceof Error ? e.message : e}`);
-        }
-      }
-
-      // ── Fire-and-forget ──
-      const result = buildCommand(args as Record<string, unknown>);
-      if (result.error) return result.error;
-      await enqueueCommand(viewUUID, result.value!);
+    async ({ source, vars, camera }): Promise<CallToolResult> => {
       return {
-        content: [{ type: "text", text: `Queued ${args.action} command for ${viewUUID}.` }],
+        content: [
+          {
+            type: "text",
+            text:
+              "OpenSCAD viewer opened. Use the viewer's `interact` tool to modify the model " +
+              "(write_source, edit_source, set_var, set_vars, set_camera, render, zoom, auto_fit, " +
+              "get_screenshot, get_state).",
+          },
+        ],
+        // The view reads its initial state from this structured content
+        // (via ontoolresult) — including the defaults applied above when
+        // the model omitted an argument.
+        structuredContent: {
+          source,
+          camera,
+          ...(vars ? { vars } : {}),
+        },
       };
     },
   );
 
-  // ─── Poll tool (app-only, long-polling) ─────────────────────────────
-
-  registerAppTool(server, "poll_commands", {
-    title: "Poll Commands",
-    description: "Internal: App polls for pending commands. Uses long-polling (up to 30s hold).",
-    inputSchema: {
-      viewUUID: z.string(),
-    },
-    _meta: { ui: { resourceUri: RESOURCE_URI, visibility: ["app"] } },
-  }, async ({ viewUUID }): Promise<CallToolResult> => {
-    // Long-poll: parks until commands arrive or 30s timeout
-    await waitForCommands(viewUUID);
-    const commands = await dequeueCommands(viewUUID);
-    return {
-      content: [{ type: "text", text: JSON.stringify({ commands }) }],
-    };
-  });
-
-  // ─── Submit result tool (app-only, for request-response bridge) ─────
-
-  registerAppTool(server, "submit_result", {
-    title: "Submit Result",
-    description: "Internal: App submits results for request-response commands (screenshots, state).",
-    inputSchema: {
-      requestId: z.string().describe("The requestId from the command"),
-      data: z.record(z.unknown()).describe("Result data"),
-    },
-    _meta: { ui: { resourceUri: RESOURCE_URI, visibility: ["app"] } },
-  }, async ({ requestId, data }): Promise<CallToolResult> => {
-    const found = await submitResult(requestId, data);
-    return {
-      content: [{ type: "text", text: found ? "OK" : `No pending request: ${requestId}` }],
-      ...(!found && { isError: true }),
-    };
-  });
-
   // ─── UI Resource ───────────────────────────────────────────────────
 
-  registerAppResource(server, "OpenSCAD Viewer", RESOURCE_URI, {
-    description: "Interactive OpenSCAD 3D viewer and editor",
-    _meta: {
-      ui: {
-        csp: {
-          resourceDomains: [new URL(BASE_URL).origin],
-          connectDomains: [new URL(BASE_URL).origin, "blob:", "data:"],
-        },
-        permissions: { clipboardWrite: {} },
-      },
+  registerAppResource(
+    server,
+    "OpenSCAD Viewer",
+    RESOURCE_URI,
+    {
+      mimeType: RESOURCE_MIME_TYPE,
+      description: "Interactive OpenSCAD 3D viewer and editor",
     },
-  }, async (): Promise<ReadResourceResult> => {
-    const html = buildAppHtml(BASE_URL);
-    return {
-      contents: [{ uri: RESOURCE_URI, mimeType: RESOURCE_MIME_TYPE, text: html }],
-    };
-  });
+    async (): Promise<ReadResourceResult> => {
+      const baseUrl = getBaseUrl();
+      const html = buildAppHtml(baseUrl);
+      return {
+        contents: [
+          {
+            uri: RESOURCE_URI,
+            mimeType: RESOURCE_MIME_TYPE,
+            text: html,
+            _meta: {
+              ui: {
+                permissions: { clipboardWrite: {} },
+                csp: {
+                  resourceDomains: [new URL(baseUrl).origin],
+                  connectDomains: [new URL(baseUrl).origin, "blob:", "data:"],
+                },
+              },
+            },
+          },
+        ],
+      };
+    },
+  );
 
   return server;
 }

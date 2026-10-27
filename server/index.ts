@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 
 import * as path from "node:path";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpExpressApp } from "@modelcontextprotocol/express";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import cors from "cors";
 import express from "express";
 import type { Request, Response } from "express";
 import { createServer } from "./openscad-server.js";
-import { isRedisEnabled, closeRedis } from "./redis-client.js";
-import { shutdownQueue } from "./command-queue.js";
 
 const DIST_DIR = process.env.OPENSCAD_DIST_DIR ?? path.resolve(import.meta.dirname ?? __dirname, "../dist");
 
@@ -33,11 +31,11 @@ async function startStreamableHTTPServer(): Promise<void> {
     console.log(`Serving dist/ files from ${DIST_DIR}`);
   }
 
-  // Each request gets a fresh McpServer instance. Tool registrations are cheap;
-  // state lives in the shared command queue (in-memory or Redis), not the server.
+  // The server is stateless (all interaction happens through the view's own
+  // app tools), so each request gets a fresh McpServer instance.
   app.all("/mcp", async (req: Request, res: Response) => {
     const server = createServer();
-    const transport = new StreamableHTTPServerTransport({
+    const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
 
@@ -63,18 +61,11 @@ async function startStreamableHTTPServer(): Promise<void> {
   });
 
   const httpServer = app.listen(port, host, () => {
-    if (isRedisEnabled()) {
-      console.log(`Redis enabled: ${process.env.REDIS_URL}`);
-    } else {
-      console.log("Using in-memory command queue");
-    }
     console.log(`OpenSCAD MCP server listening on http://${host}:${port}/mcp`);
   });
 
-  const shutdown = async () => {
+  const shutdown = () => {
     console.log("\nShutting down...");
-    await shutdownQueue();
-    await closeRedis();
     httpServer.close(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

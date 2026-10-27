@@ -4,4 +4,4 @@
  */
 
 export { createServer } from "./openscad-server.js";
-export { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+export { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";

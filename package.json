@@ -7,6 +7,8 @@
   "dependencies": {
     "@gltf-transform/core": "4.1.1",
     "@gltf-transform/extensions": "4.1.1",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/ext-apps": "^2.0.0",
     "@monaco-editor/loader": "^1.4.0",
     "@monaco-editor/react": "^4.6.0",
     "@testing-library/jest-dom": "^5.17.0",
@@ -24,7 +26,8 @@
     "react-dom": "^18.3.1",
     "thumbhash": "^0.1.1",
     "uuid": "^14.0.1",
-    "uzip": "^0.20201231.0"
+    "uzip": "^0.20201231.0",
+    "zod": "^4.2.0"
   },
   "scripts": {
     "test:e2e": "jest",
@@ -69,7 +72,7 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@types/uzip": "^0.20201231.2",
-"@types/web": "^0.0.352",
+    "@types/web": "^0.0.352",
     "@vercel/node": "^5.1.8",
     "copy-webpack-plugin": "^14.0.0",
     "css-loader": "^7.1.2",

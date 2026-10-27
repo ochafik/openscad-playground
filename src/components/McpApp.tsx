@@ -1,15 +1,29 @@
 /**
  * MCP App mode: minimal UI with viewer, customizer overlay, and toolbar.
- * Connects to the MCP host, polls for commands, and reports state.
+ *
+ * The App (created in index.tsx) registers the `interact` tool with the
+ * host before connecting; this component installs the processor those tool
+ * handlers delegate to, and reports passive state changes back to the model
+ * via updateModelContext.
  */
 
 import React, { CSSProperties, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import type { App } from '@modelcontextprotocol/ext-apps';
 import { State, StatePersister } from '../state/app-state.ts';
 import { Model } from '../state/model.ts';
 import ViewerPanel, { ViewerPanelHandle } from './ViewerPanel.tsx';
 import CustomizerPanel from './CustomizerPanel.tsx';
 import { ModelContext, FSContext, McpContext } from './contexts.ts';
-import { McpAppClient, OpenSCADCommand, startCommandPoller, McpCommandProcessor, applyHostStyles } from '../state/mcp-app.ts';
+import {
+  OpenSCADCommand,
+  McpToolProcessor,
+  ToolEventBuffer,
+  ToolInputParams,
+  ToolResultParams,
+  setActiveProcessor,
+  publishModelContext,
+  applyHostStyles,
+} from '../state/mcp-app.ts';
 import { PREDEFINED_ORBITS } from './ViewerPanel.tsx';
 import { encodeStateParamsAsFragment } from '../state/fragment-state.ts';
 import { ProgressBar } from 'primereact/progressbar';
@@ -18,16 +32,17 @@ export function McpApp({
   initialState,
   statePersister,
   fs,
-  mcpClient,
+  app,
+  toolEvents,
 }: {
   initialState: State;
   statePersister: StatePersister;
   fs: FS;
-  mcpClient: McpAppClient;
+  app: App;
+  toolEvents: ToolEventBuffer;
 }) {
   const [state, setState] = useState(initialState);
   const [showCustomizer, setShowCustomizer] = useState(false);
-  const [viewUUID, setViewUUID] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const model = new Model(fs, state, setState, statePersister);
@@ -50,9 +65,9 @@ export function McpApp({
 
   // Theme detection: prefer hostContext, fall back to media query
   const [isDark, setIsDark] = useState(() => {
-    const ctx = mcpClient.getHostContext();
-    if (ctx.theme === 'light') return false;
-    if (ctx.theme === 'dark') return true;
+    const ctx = app.getHostContext();
+    if (ctx?.theme === 'light') return false;
+    if (ctx?.theme === 'dark') return true;
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
   });
 
@@ -86,82 +101,102 @@ export function McpApp({
 
   useEffect(() => model.init());
 
-  // Listen for tool input (initial source) and tool result (viewUUID)
-  useEffect(() => {
-    mcpClient.ontoolinput = (params) => {
-      const args = params.arguments ?? {};
-      if (args.source && typeof args.source === 'string') {
-        model.mutate(s => {
-          s.params.sources = s.params.sources.map(src =>
-            src.path === s.params.activePath ? { path: src.path, content: args.source as string } : src
-          );
-        });
-        // Trigger syntax check and preview
-        model.source = args.source as string;
-      }
-      if (args.vars && typeof args.vars === 'object') {
-        for (const [name, value] of Object.entries(args.vars as Record<string, unknown>)) {
-          model.setVar(name, value);
-        }
-      }
-    };
+  // Always act on the latest model/viewer — tool handlers and buffered-event
+  // replay outlive any single render's closures.
+  const modelRef = useRef(model);
+  modelRef.current = model;
 
-    mcpClient.ontoolresult = (params) => {
-      // Check _meta for viewUUID (new pattern)
-      const meta = params._meta;
-      if (meta?.viewUUID && typeof meta.viewUUID === 'string') {
-        setViewUUID(meta.viewUUID);
-        return;
-      }
-
-      // Fallback: parse text content for viewUUID
-      const text = params.content?.find((c: any) => c.type === 'text')?.text;
-      if (text) {
-        // Look for viewUUID in text like "OpenSCAD viewer created (viewUUID: xxx)."
-        const match = text.match(/viewUUID:\s*([0-9a-f-]+)/);
-        if (match) {
-          setViewUUID(match[1]);
-        }
-      }
-    };
+  const applySource = useCallback((source: string) => {
+    const m = modelRef.current;
+    m.mutate(s => {
+      s.params.sources = s.params.sources.map(src =>
+        src.path === s.params.activePath ? { path: src.path, content: source } : src
+      );
+    });
+    // Trigger syntax check and preview
+    m.source = source;
   }, []);
 
-  // Start polling when we have a viewUUID
-  useEffect(() => {
-    if (!viewUUID) return;
+  const applyCameraPreset = useCallback((view: string) => {
+    const preset = PREDEFINED_ORBITS.find(
+      ([name]) => name.toLowerCase() === view.toLowerCase()
+    );
+    if (preset) {
+      viewerRef.current?.setCameraOrbit(preset[1], preset[2]);
+    }
+  }, []);
 
-    const processor: McpCommandProcessor = {
+  // Apply the create tool's input (early: streamed before the result).
+  const applyToolInput = useCallback((params: ToolInputParams) => {
+    const args = params.arguments ?? {};
+    if (args.source && typeof args.source === 'string') {
+      applySource(args.source);
+    }
+    if (args.vars && typeof args.vars === 'object') {
+      for (const [name, value] of Object.entries(args.vars as Record<string, unknown>)) {
+        modelRef.current.setVar(name, value);
+      }
+    }
+  }, [applySource]);
+
+  // Apply the create tool's result — authoritative: carries the server-side
+  // defaults (e.g. the demo source and camera preset when the model passed
+  // no arguments).
+  const applyToolResult = useCallback((params: ToolResultParams) => {
+    const sc = params.structuredContent as Record<string, unknown> | undefined;
+    if (!sc || typeof sc !== 'object') return;
+    if (typeof sc.source === 'string' && sc.source !== modelRef.current.source) {
+      applySource(sc.source);
+    }
+    if (sc.vars && typeof sc.vars === 'object') {
+      for (const [name, value] of Object.entries(sc.vars as Record<string, unknown>)) {
+        // Skip values already applied from the tool-input notification —
+        // each setVar schedules a preview render.
+        const current = modelRef.current.state.params.vars?.[name];
+        if (JSON.stringify(current) !== JSON.stringify(value)) {
+          modelRef.current.setVar(name, value);
+        }
+      }
+    }
+    if (typeof sc.camera === 'string') {
+      applyCameraPreset(sc.camera);
+    }
+  }, [applySource, applyCameraPreset]);
+
+  // Replay events buffered before mount, then take over the handlers.
+  useEffect(() => {
+    for (const params of toolEvents.inputs.splice(0)) applyToolInput(params);
+    for (const params of toolEvents.results.splice(0)) applyToolResult(params);
+    app.ontoolinput = applyToolInput;
+    app.ontoolresult = applyToolResult;
+  }, [app, toolEvents, applyToolInput, applyToolResult]);
+
+  // Install the processor that the view-registered `interact` tool delegates to
+  useEffect(() => {
+    const processor: McpToolProcessor = {
       async processCommand(command: OpenSCADCommand): Promise<unknown> {
+        const model = modelRef.current;
         switch (command.type) {
           case 'write_source': {
-            const content = command.content as string;
-            model.source = content;
-            await waitForIdle(model, 5000);
-            return;
+            applySource(command.content as string);
+            return { timedOut: !(await waitForIdle(modelRef.current, 5000)) };
           }
           case 'edit_source': {
             const oldText = command.old_text as string;
             const newText = command.new_text as string;
             const current = model.source;
-            if (current.includes(oldText)) {
-              model.source = current.replace(oldText, newText);
-              await waitForIdle(model, 5000);
+            if (!current.includes(oldText)) {
+              return { notFound: true }; // caller reports "old_text not found"
             }
-            return;
-          }
-          case 'read_source': {
-            // No-op: model context update will carry current state
-            return;
+            // Replacement callback: a literal new_text must not have its
+            // $-sequences ($$, $&, …) interpreted by String.replace.
+            applySource(current.replace(oldText, () => newText));
+            return { timedOut: !(await waitForIdle(modelRef.current, 5000)) };
           }
           case 'set_camera': {
             const { view, theta, phi } = command as any;
             if (typeof view === 'string') {
-              const preset = PREDEFINED_ORBITS.find(
-                ([name]) => name.toLowerCase() === view.toLowerCase()
-              );
-              if (preset) {
-                viewerRef.current?.setCameraOrbit(preset[1], preset[2]);
-              }
+              applyCameraPreset(view);
             } else if (typeof theta === 'number' && typeof phi === 'number') {
               viewerRef.current?.setCameraOrbit(theta, phi);
             }
@@ -170,8 +205,7 @@ export function McpApp({
           case 'set_var': {
             const { name, value } = command as any;
             model.setVar(name as string, value);
-            await waitForIdle(model, 10000);
-            return;
+            return { timedOut: !(await waitForIdle(modelRef.current, 10000)) };
           }
           case 'set_vars': {
             const vars = (command as any).vars as Record<string, unknown>;
@@ -180,13 +214,11 @@ export function McpApp({
             }
             // Trigger single preview render
             model.render({ isPreview: true, now: false });
-            await waitForIdle(model, 10000);
-            return;
+            return { timedOut: !(await waitForIdle(modelRef.current, 10000)) };
           }
           case 'render': {
             model.render({ isPreview: false, now: true });
-            await waitForIdle(model, 30000);
-            return;
+            return { timedOut: !(await waitForIdle(modelRef.current, 30000)) };
           }
           case 'zoom': {
             const factor = (command as any).factor as number;
@@ -202,7 +234,7 @@ export function McpApp({
             return { screenshot: screenshot ?? null };
           }
           case 'get_state': {
-            await waitForIdle(model, 5000);
+            await waitForIdle(modelRef.current, 5000);
             return processor.getContextState();
           }
         }
@@ -213,6 +245,7 @@ export function McpApp({
       },
 
       getContextState(): Record<string, unknown> {
+        const model = modelRef.current;
         const s = model.state;
         const cam = viewerRef.current?.getCameraInfo();
         return {
@@ -240,19 +273,21 @@ export function McpApp({
       },
     };
 
-    const { stop: stopPolling, updateContext } = startCommandPoller(mcpClient, viewUUID, processor);
-    updateContextRef.current = updateContext;
-    return stopPolling;
-  }, [viewUUID]);
+    setActiveProcessor(processor);
+    updateContextRef.current = () => publishModelContext(app, processor);
+    return () => {
+      setActiveProcessor(null);
+      updateContextRef.current = null;
+    };
+  }, [app, applySource, applyCameraPreset]);
 
   // Auto-update model context when source, vars, or rendering status change
   const sourceContent = state.params.sources.find(s => s.path === state.params.activePath)?.content;
   const varsJson = JSON.stringify(state.params.vars ?? {});
   const isIdle = !state.rendering && !state.previewing && !state.checkingSyntax;
   useEffect(() => {
-    if (!viewUUID) return;
     scheduleContextUpdate();
-  }, [viewUUID, sourceContent, varsJson, isIdle, scheduleContextUpdate]);
+  }, [sourceContent, varsJson, isIdle, scheduleContextUpdate]);
 
   // Clean up debounce timer on unmount
   useEffect(() => {
@@ -267,14 +302,14 @@ export function McpApp({
   // Apply host styles and listen for changes
   useEffect(() => {
     // Apply initial host styles
-    const ctx = mcpClient.getHostContext();
-    applyHostStyles(ctx);
+    applyHostStyles(app.getHostContext());
 
     // Listen for host context changes (theme, CSS variables, fonts)
-    mcpClient.onhostcontextchanged = (newCtx) => {
+    app.onhostcontextchanged = () => {
+      const newCtx = app.getHostContext();
       applyHostStyles(newCtx);
-      if (newCtx.theme === 'light') setIsDark(false);
-      else if (newCtx.theme === 'dark') setIsDark(true);
+      if (newCtx?.theme === 'light') setIsDark(false);
+      else if (newCtx?.theme === 'dark') setIsDark(true);
     };
 
     // Fallback: listen for OS dark mode changes
@@ -282,13 +317,12 @@ export function McpApp({
     if (mq) {
       const handler = (e: MediaQueryListEvent) => {
         // Only use media query if host hasn't set a theme
-        const hctx = mcpClient.getHostContext();
-        if (!hctx.theme) setIsDark(e.matches);
+        if (!app.getHostContext()?.theme) setIsDark(e.matches);
       };
       mq.addEventListener('change', handler);
       return () => mq.removeEventListener('change', handler);
     }
-  }, [mcpClient]);
+  }, [app]);
 
   const params = state.parameterSet?.parameters ?? [];
   const hasParams = params.length > 0;
@@ -300,14 +334,16 @@ export function McpApp({
   const openInBrowser = useCallback(async () => {
     const fragment = await encodeStateParamsAsFragment(state);
     const url = `https://ochafik.com/openscad2/#${fragment}`;
-    mcpClient.openLink(url);
-  }, [state, mcpClient]);
+    app.openLink({ url }).catch(e => console.warn('openLink failed:', e));
+  }, [state, app]);
 
   const toggleFullscreen = useCallback(() => {
     const newMode = isFullscreen ? 'inline' : 'fullscreen';
-    mcpClient.requestDisplayMode(newMode as any);
-    setIsFullscreen(!isFullscreen);
-  }, [isFullscreen, mcpClient]);
+    app.requestDisplayMode({ mode: newMode })
+      // Track the mode the host actually granted (it may deny fullscreen).
+      .then(result => setIsFullscreen(result.mode === 'fullscreen'))
+      .catch(e => console.warn('requestDisplayMode failed:', e));
+  }, [isFullscreen, app]);
 
   // Keyboard shortcuts: +/- zoom, Alt+Enter fullscreen
   useEffect(() => {
@@ -362,7 +398,7 @@ export function McpApp({
   return (
     <ModelContext.Provider value={model}>
       <FSContext.Provider value={fs}>
-        <McpContext.Provider value={mcpClient}>
+        <McpContext.Provider value={app}>
           <div className="mcp-viewer-container" style={{
             display: 'flex',
             flexDirection: 'column',
@@ -635,17 +671,18 @@ function CornerButton({
 /**
  * Wait until the model is idle (not checking syntax, not rendering).
  */
-function waitForIdle(model: Model, timeoutMs: number): Promise<void> {
+/** Resolves true once the model is idle, false when timeoutMs elapses first. */
+function waitForIdle(model: Model, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
       const s = model.state;
       if (!s.checkingSyntax && !s.previewing && !s.rendering) {
-        resolve();
+        resolve(true);
         return;
       }
       if (Date.now() - start > timeoutMs) {
-        resolve(); // Timeout: resolve with whatever state we have
+        resolve(false); // Timeout: the operation is still running
         return;
       }
       setTimeout(check, 100);
