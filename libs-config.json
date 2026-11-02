@@ -215,6 +215,38 @@
                 "LICENSE"
             ],
             "commit": "a9815be6fcca9bc46411409aa503bbb60921264a"
+        },
+        {
+            "name": "gridfinity-rebuilt-openscad",
+            "repo": "https://github.com/kennetek/gridfinity-rebuilt-openscad.git",
+            "branch": "main",
+            "zipIncludes": [
+                "*.scad",
+                "LICENSE"
+            ],
+            "tag": "2.0.0",
+            "commit": "910e22d8607fd7f5f51ad5e5cbc5287a76810bfd"
+        },
+        {
+            "name": "Round-Anything",
+            "repo": "https://github.com/Irev-Dev/Round-Anything.git",
+            "branch": "master",
+            "zipIncludes": [
+                "*.scad",
+                "LICENSE"
+            ],
+            "tag": "1.0.4",
+            "commit": "8ead00a2bf3ace4004cbd29e8909ab83e67bb155"
+        },
+        {
+            "name": "threads-scad",
+            "repo": "https://github.com/rcolyer/threads-scad.git",
+            "branch": "master",
+            "zipIncludes": [
+                "*.scad",
+                "LICENSE.txt"
+            ],
+            "commit": "4ae9aeb3b136f9858200f77a304b909a000ce3b4"
         }
     ],
     "fonts": {

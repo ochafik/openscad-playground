@@ -45,6 +45,9 @@ const cases = {
   'UB.scad': 'include <UB.scad/libraries/ub.scad>\ncube(5);',
   'openscad-tray': 'include <openscad-tray/tray.scad>\ntray([100, 60, 30], n_columns=3, n_rows=2);',
   lasercut: 'include <lasercut/lasercut.scad>\nlasercutout(thickness=3, points=[[0,0],[40,0],[40,30],[0,30]]);',
+  'gridfinity-rebuilt-openscad': 'include <gridfinity-rebuilt-openscad/gridfinity-rebuilt-bins.scad>',
+  'Round-Anything': 'include <Round-Anything/polyround.scad>\nradiiPoints=[[-4,0,1],[5,3,1.5],[0,7,0.1],[8,7,10],[20,20,0.8],[10,0,10]];\nlinear_extrude(2) polygon(polyRound(radiiPoints,30));',
+  'threads-scad': 'use <threads-scad/threads.scad>\nScrewThread(10, 20, pitch=1.5);',
 };
 
 if (args.examples) { // render every bundled OpenSCAD example instead (needs libs/openscad from `npm run build:libs`)
