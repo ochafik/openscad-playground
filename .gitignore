@@ -10,3 +10,6 @@ src/wasm
 .env*.local
 *.log
 public/openscad.fallback.js
+
+# Vercel deployment
+api/_server.js

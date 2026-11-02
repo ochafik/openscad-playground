@@ -1,0 +1,11 @@
+node_modules
+server/node_modules
+.git
+.vercel
+libs
+dist
+tests
+examples
+public/libraries
+public/openscad.fallback.js
+*.wasm.map
