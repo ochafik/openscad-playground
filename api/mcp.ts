@@ -1,7 +1,7 @@
 /**
  * Vercel serverless function for the MCP endpoint.
  *
- * Imports from api/_server.js which is pre-bundled by esbuild during
+ * Imports from api/_server.mjs which is pre-bundled by esbuild during
  * the Vercel build step (includes all MCP SDK + server deps).
  *
  * The server is stateless — all viewer interaction happens through app
@@ -10,6 +10,9 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+// Built by esbuild before deploy (see vercel.json); the package is "type": "module".
+// @ts-ignore: generated file, absent at type-check time
+import { createServer, resolveBaseUrl, NodeStreamableHTTPServerTransport } from "./_server.mjs";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS preflight
@@ -23,8 +26,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const { createServer, resolveBaseUrl, NodeStreamableHTTPServerTransport } = require("./_server.js");
-
     // Asset base follows the request host (X-Forwarded-Host is trusted on
     // Vercel), so any deployment URL works without configuration.
     const server = createServer(resolveBaseUrl(req));
