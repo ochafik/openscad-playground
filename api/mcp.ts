@@ -23,9 +23,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const { createServer, NodeStreamableHTTPServerTransport } = require("./_server.js");
+    const { createServer, resolveBaseUrl, NodeStreamableHTTPServerTransport } = require("./_server.js");
 
-    const server = createServer();
+    // Asset base follows the request host (X-Forwarded-Host is trusted on
+    // Vercel), so any deployment URL works without configuration.
+    const server = createServer(resolveBaseUrl(req));
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
