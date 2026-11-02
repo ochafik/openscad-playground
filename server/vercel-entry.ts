@@ -5,4 +5,5 @@
 
 export { createServer } from "./openscad-server.js";
 export { resolveBaseUrl } from "./base-url.js";
+export { HELP_HEADERS, renderHelpPage, wantsHtml } from "./help-page.js";
 export { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
