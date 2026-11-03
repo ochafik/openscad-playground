@@ -140,6 +140,10 @@ The server is a standard Node.js/Express app. Deploy `server/` with:
 | `OPENSCAD_SERVE_DIST` | _(unset)_ | Set to any value to enable static file serving (alternative to `--serve-dist` flag) |
 | `ASSET_PORT` | `0` (auto) | Port for the stdio-mode asset server (only used with `--stdio --serve-dist`) |
 
+## Icons
+
+The server and its model-visible/entrypoint tools (`create`, `open_openscad`, `open_scad_file`) and the UI resource carry the playground's 3D logo as MCP `icons`: `serverInfo.icons` (initialize and `server/discover`; the SDK also stamps it into `_meta["io.modelcontextprotocol/serverInfo"]`) and `icons` on each tool's `tools/list` entry (ChatGPT resolves the tool's icons first, then the server's). Three sizes: absolute `https://<base>/logo512.png` and `logo192.png` (image/png) derived from the same per-request base URL as the app assets (`OPENSCAD_BASE_URL` wins), plus a 64x64 `data:` URI for hosts that refuse remote fetches. The PNGs are `public/logo*.png`, copied to the root of `dist/`; the static host must serve them with CORS open (Vercel sends `access-control-allow-origin: *` for static files). The help page at `/mcp` shows the logo from the same origin.
+
 ## Tools
 
 ### Server tools
@@ -151,6 +155,10 @@ The server is a standard Node.js/Express app. Deploy `server/` with:
 | `open_scad_file` | App-only. ChatGPT file entrypoint for `.scad`; receives `{file: {name, resourceUri}}`. The view reads the file through the host (`resources/read`) and saves edits back with `openai/resources/write` when the host marks it writable. |
 
 All three share the one UI resource and carry `readOnlyHint`/`openWorldHint: false` annotations. Hosts without the OpenAI MCP Extensions ignore the `openai/*` keys.
+
+### Customizer reminder
+
+Top-level variables annotated like `width = 60; // [10:100]` are customizer parameters: `set_parameters` overlays values on the source without modifying it, which is the quickest way to satisfy "make it taller" or "thicker walls". The server `instructions`, the `create` description and the `get_parameters` / `set_parameters` descriptions say so briefly and tell the model to check parameters before editing code for value tweaks. Every model context update lists the parameter names on one short line (with short current values, at most 30 then `+N more`), because each update replaces the previous context.
 
 ### Display mode
 
