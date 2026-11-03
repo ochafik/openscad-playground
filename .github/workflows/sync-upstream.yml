@@ -1,0 +1,113 @@
+name: Sync upstream
+
+# Merges openscad/openscad-playground main into this fork's deploy branch,
+# runs the full verification, and pushes only if everything is green. Vercel's
+# GitHub integration then deploys the push. See docs/DEPLOYMENT_AUTOMATION.md.
+#
+# Scheduled workflows only run from the repository's default branch, so the
+# fork's default branch must be deploy/vercel.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run every check but do not push, open issues or create branches
+        type: boolean
+        default: false
+      min_age_hours:
+        description: Only merge upstream commits at least this many hours old (cooling-off)
+        type: string
+        default: "0"
+  # TEMPORARY (removed before merge): push-triggered dry run to test the YAML.
+  push:
+    branches: ["ci-test/*"]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      TARGET_BRANCH: deploy/vercel
+      # Test pushes are always dry runs, merging into the pushed commit itself.
+      DRY_RUN: ${{ (github.event_name == 'push' || inputs.dry_run) && 'true' || 'false' }}
+      BASE_REF: ${{ github.event_name == 'push' && 'HEAD' || '' }}
+      MIN_AGE_HOURS: ${{ inputs.min_age_hours || vars.SYNC_MIN_AGE_HOURS || '0' }}
+      # Optional PAT with the `workflow` scope; without it, merges touching
+      # .github/workflows are reported instead of pushed.
+      ALLOW_WORKFLOW_CHANGES: ${{ secrets.SYNC_PUSH_TOKEN != '' && 'true' || 'false' }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_PUSH_TOKEN || github.token }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set log directory
+        run: echo "LOG_DIR=$RUNNER_TEMP/sync-logs" >> "$GITHUB_ENV"
+
+      - name: Merge upstream and verify
+        id: sync
+        run: |
+          set +e
+          bash scripts/sync-upstream.sh
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          cat "$LOG_DIR/result.env" >> "$GITHUB_OUTPUT"
+
+      - name: Report
+        if: always() && steps.sync.outputs.status != ''
+        env:
+          STATUS: ${{ steps.sync.outputs.status }}
+          FAILED_STEP: ${{ steps.sync.outputs.failed_step }}
+          ISSUE_TITLE: ${{ steps.sync.outputs.issue_title }}
+        run: |
+          {
+            echo "### Upstream sync: $STATUS"
+            echo "- upstream: \`${{ steps.sync.outputs.upstream_sha }}\`"
+            echo "- candidate: \`${{ steps.sync.outputs.candidate_sha }}\`"
+            echo "- dry run: $DRY_RUN, min age: ${MIN_AGE_HOURS}h"
+            [ -n "$FAILED_STEP" ] && echo "- failed step: **$FAILED_STEP** ${{ steps.sync.outputs.conflicts }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$STATUS" in
+            conflict|failed|blocked-workflows)
+              # Keep the candidate for inspection (best effort; may be refused
+              # for merges that touch workflow files).
+              if [ "$DRY_RUN" != true ] && git rev-parse -q --verify refs/heads/sync/candidate >/dev/null && [ -n "${{ steps.sync.outputs.candidate_sha }}" ]; then
+                git push origin "sync/candidate:refs/heads/sync-failed/$(date -u +%Y%m%d-%H%M)" || true
+              fi
+              bash scripts/upsert-issue.sh open "$ISSUE_TITLE" "$LOG_DIR/issue.md" ;;
+            pushed)
+              for t in "Upstream sync conflict" "Upstream sync failed" "Upstream sync needs a manual merge"; do
+                bash scripts/upsert-issue.sh close "$t" "Resolved by $RUN_URL"
+              done ;;
+          esac
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sync-logs
+          path: ${{ runner.temp }}/sync-logs
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail the run if the sync did not succeed
+        if: always() && steps.sync.outputs.exit_code != '0'
+        run: |
+          echo "Sync status: ${{ steps.sync.outputs.status }} (exit ${{ steps.sync.outputs.exit_code }})"
+          exit 1

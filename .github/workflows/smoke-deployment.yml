@@ -1,0 +1,75 @@
+name: Smoke test deployment
+
+# Runs after Vercel (GitHub integration) reports a successful Production
+# deployment, or on demand against any URL. Vercel names the environment
+# "Production" (or "Production – <project>" when a repo has several projects).
+
+on:
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Site to test
+        type: string
+        default: https://openscad.ochafik.com
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: smoke-deployment
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.deployment_status.state == 'success' &&
+       startsWith(github.event.deployment_status.environment, 'Production'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Always test the production alias, never the per-deployment URL: that
+      # one can sit behind Vercel deployment protection.
+      SMOKE_URL: ${{ inputs.url || 'https://openscad.ochafik.com' }}
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.deployment.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.deployment.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+
+      - name: Smoke test
+        id: smoke
+        run: |
+          set +e
+          # The alias can lag the status by a few seconds: retry.
+          for attempt in 1 2 3; do
+            node scripts/smoke-deployment.mjs "$SMOKE_URL" 2>&1 | tee smoke.log
+            rc=${PIPESTATUS[0]}
+            [ "$rc" -eq 0 ] && break
+            [ "$attempt" -lt 3 ] && sleep 20
+          done
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Open or update issue
+        if: failure() && steps.smoke.outputs.rc != '' && steps.smoke.outputs.rc != '0'
+        run: |
+          {
+            echo "Smoke test of $SMOKE_URL failed for ${SHA}."
+            echo
+            echo '```'
+            tail -n 60 smoke.log
+            echo '```'
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "Roll back: Vercel dashboard > Deployments > previous production deployment > Instant Rollback."
+          } > issue.md
+          bash scripts/upsert-issue.sh open "Smoke test failed for ${SHA:0:9}" issue.md
