@@ -59,7 +59,7 @@ fi
 
 echo "Fetching wasm2js fallback ${url}"
 mkdir -p public
-curl -fL --retry 3 --retry-delay 5 --retry-all-errors -o "${DEST}" "${url}" \
+curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors -o "${DEST}" "${url}" \
   || { echo "ERROR: could not download the pinned fallback from ${url}" >&2; exit 1; }
 got="$(sha256_of "${DEST}")"
 if [ "${got}" != "${want}" ]; then
