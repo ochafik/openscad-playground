@@ -332,6 +332,21 @@ describe('e2e', () => {
     expect(await page.evaluate(() => document.body.innerText)).not.toContain('FunctionalOpenSCAD');
   }, longTimeout);
 
+  test('the file picker keeps the folders you expanded when the app re-renders', async () => {
+    await loadSrc('cube([10, 10, 10]);');
+    await waitForViewer();
+    await page.click('.p-treeselect');
+    await expandTreePath(['libraries', 'openscad', 'examples']);
+    const expandedFolders = () => page.evaluate(() => [...document.querySelectorAll('li.p-treenode[aria-expanded=true]')]
+      .map(li => li.querySelector(':scope > .p-treenode-content .p-treenode-label')?.textContent));
+    expect(await expandedFolders()).toEqual(expect.arrayContaining(['libraries', 'openscad', 'examples']));
+    // Any state change re-renders the app (here: editing the source, which renders again).
+    const before = await page.evaluate(() => document.querySelector('model-viewer.main-viewer').src);
+    await page.evaluate(() => window.monaco.editor.getModels()[0].setValue('cube([12, 12, 12]);'));
+    await page.waitForFunction((before) => document.querySelector('model-viewer.main-viewer').src !== before, {timeout: 30000}, before);
+    expect(await expandedFolders()).toEqual(expect.arrayContaining(['libraries', 'openscad', 'examples']));
+  }, longTimeout);
+
   test('opening a file of a lazy library fetches the library and opens the file', async () => {
     await loadSrc('cube([10, 10, 10]);');
     await waitForViewer();
@@ -389,15 +404,18 @@ describe('e2e', () => {
     }, {timeout: 30000});
     // The widget only renders the first rows: narrow the list down to a lazy library, then to its files.
     const suggests = (text) => page.waitForFunction((text) => document.querySelector('.suggest-widget.visible')?.textContent.includes(text), {timeout: 30000}, text);
-    await page.keyboard.type('bolt');
-    await suggests('boltsparts');
-    await page.keyboard.type('sparts/');
-    await suggests('vacuum');
-    await page.keyboard.type('vacuum/');
-    await suggests('CF-Flange.scad');
-    requests.stop();
-    expect(requests.zips).not.toContain('boltsparts');
-    messages.length = 0; // `use <` alone is not a valid script
+    try {
+      await page.keyboard.type('bolt', {delay: 50});
+      await suggests('boltsparts');
+      await page.keyboard.type('sparts/', {delay: 50});
+      await suggests('vacuum');
+      await page.keyboard.type('vacuum/', {delay: 50});
+      await suggests('CF-Flange.scad');
+      requests.stop();
+      expect(requests.zips).not.toContain('boltsparts');
+    } finally {
+      messages.length = 0; // the incomplete scripts typed here fail to render: not what this test is about
+    }
   }, longTimeout);
 
   test('a removed library gives OpenSCAD\'s missing file warning and a hint', async () => {
@@ -474,7 +492,8 @@ describe('e2e', () => {
 
   // Only the production build has a Service Worker.
   (isProd ? test : test.skip)('works offline after a first visit', async () => {
-    await loadSrc('cube([10, 10, 10]);');
+    // A first visit that uses BOSL2 and fonts (fetched by the render worker, before the Service Worker is in control).
+    await loadSrc('include <BOSL2/std.scad>\nlinear_extrude(1) text("Online");\nprismoid([40,40], [0,0], h=20);');
     await waitForViewer();
 
     // Wait for the Service Worker to be in control and for the (deferred)
@@ -798,6 +817,38 @@ describe('Configure MCP menu entry', () => {
     const urls = (await browser.pages()).map(p => p.url());
     expect(urls).toContain(new URL(configured, baseUrl).toString());
     await (await target.page())?.close();
+  }, longTimeout);
+});
+
+describe('view notices', () => {
+  const src = encodeURIComponent('cube([5, 5, 5]);');
+  const orbit = () => page.$eval('model-viewer.main-viewer', el => { const o = el.getCameraOrbit(); return [o.theta, o.phi].map(v => Math.round(v * 1000) / 1000); });
+  async function clickAxesGizmo() {
+    await page.waitForSelector('model-viewer:not(.main-viewer)', { timeout: 45000 });
+    await new Promise(r => setTimeout(r, 1500)); // let the models load
+    const box = await (await page.$('model-viewer:not(.main-viewer)')).boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  }
+
+  test('embed: clicking the axes gizmo changes the view without a visible toast, but announces it', async () => {
+    await page.goto(`${baseUrl}?embed=1#src=${src}`);
+    await waitForViewer();
+    await page.waitForSelector('[role=toolbar]', { timeout: 45000 });
+    const before = await orbit();
+    await clickAxesGizmo();
+    await page.waitForFunction(() => /view$/.test(document.querySelector('[data-announcer]')?.textContent ?? ''), { timeout: 10000 });
+    expect(await page.$$('.p-toast-message')).toHaveLength(0);
+    await new Promise(r => setTimeout(r, 1500));
+    expect(await orbit()).not.toEqual(before);
+    expect(await page.$$('.p-toast-message')).toHaveLength(0);
+  }, longTimeout);
+
+  test('full UI: the same click still shows the toast', async () => {
+    await page.goto(`${baseUrl}?embed=0#src=${src}`);
+    await waitForViewer();
+    await clickAxesGizmo();
+    await page.waitForSelector('.p-toast-message', { timeout: 10000 });
+    expect(await page.$eval('.p-toast-message', el => el.textContent)).toMatch(/view/);
   }, longTimeout);
 });
 
