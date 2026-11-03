@@ -55,6 +55,7 @@ if [ "${run_hash}" != "${hash}" ]; then
   exit 1
 fi
 
+rm -f "${WORKDIR}/openscad.fallback.js"
 gh run download "${run_id}" -R "${REPO}" -n openscad.fallback.js -D "${WORKDIR}"
 f="${WORKDIR}/openscad.fallback.js"
 node scripts/check-wasm-fallback.mjs "${f}"
