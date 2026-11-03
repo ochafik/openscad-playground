@@ -83,7 +83,12 @@ Emergency bypass: `fast-track.yml` (below).
    framability (no `X-Frame-Options`/`frame-ancestors`), the `/mcp` help page,
    CORS preflight, `initialize`, `tools/list` (`create`),
    `resources/read ui://openscad/viewer.html` (CSP domains and
-   `openscad-base-url` equal the requested origin) and, with `--expect-sha`,
+   `openscad-base-url` equal the requested origin), a headless-Chrome check
+   that the site renders with no `WebAssembly` global (`--js-flags=--jitless`;
+   fails on any `pageerror`, waits up to 120 s for "Total rendering time";
+   prints SKIP if puppeteer/Chrome are unavailable; the workflow installs
+   puppeteer with `--no-save` and uses the runner's `google-chrome`; skipped
+   by `--skip-static`) and, with `--expect-sha`,
    that `/version.json` reports that commit (`--wait-s` polls for it first).
    Prints a PASS/FAIL table, exits 1 on any failure.
 5. **`scripts/write-version.mjs`** writes `dist/version.json`
@@ -120,7 +125,8 @@ and delivered to the Vercel build as a pinned download:
    `dist/` unminified and out of the service worker precache.
 5. **Smoke**: `smoke-deployment.mjs` requires `/openscad.fallback.js` to be a
    200 JavaScript response over 10 MB whose sha256 equals the pin exposed in
-   `/version.json` (`fallback.sha256`). The sync's `fallback-fetch` check runs the
+   `/version.json` (`fallback.sha256`), and a jitless headless Chrome must render
+   the default model through it ("renders with no WebAssembly"). The sync's `fallback-fetch` check runs the
    same prebuild step on the candidate.
 
 The first release can be created by the sync itself (it will wait ~25 min once)

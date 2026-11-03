@@ -41,6 +41,9 @@ env:
   STAGING_URL: ${{ vars.STAGING_URL || 'https://staging.openscad.ochafik.com' }}
   PRODUCTION_URL: ${{ vars.PRODUCTION_URL || 'https://openscad.ochafik.com' }}
   GH_TOKEN: ${{ github.token }}
+  # Browser check (no-WebAssembly render): use the runner's Chrome, no download.
+  PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+  PUPPETEER_SKIP_DOWNLOAD: "1"
 
 jobs:
   staging:
@@ -102,6 +105,10 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Install puppeteer (for the no-WebAssembly browser check)
+        if: steps.plan.outputs.ignore != 'true'
+        run: npm i puppeteer --no-save --no-package-lock --ignore-scripts
+
       - name: Smoke staging
         if: steps.plan.outputs.ignore != 'true'
         env:
@@ -151,6 +158,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
+
+      - name: Install puppeteer (for the no-WebAssembly browser check)
+        run: npm i puppeteer --no-save --no-package-lock --ignore-scripts
 
       - name: Fast-forward deploy/vercel to the tested commit
         run: |
@@ -215,6 +225,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
+
+      - name: Install puppeteer (for the no-WebAssembly browser check)
+        run: npm i puppeteer --no-save --no-package-lock --ignore-scripts
 
       - name: Smoke production
         run: |

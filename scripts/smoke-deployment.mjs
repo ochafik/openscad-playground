@@ -13,7 +13,9 @@
 //   --expect-sha S Require /version.json (written at build time) to report commit S.
 //   --wait-s N     With --expect-sha: poll /version.json up to N seconds until it
 //                  matches (waiting for a deployment to go live) before testing.
-//   --skip-static  Only run the MCP checks (e.g. server without OPENSCAD_SERVE_DIST).
+//   --skip-static  Only run the MCP checks (e.g. server without OPENSCAD_SERVE_DIST);
+//                  also skips the headless-Chrome no-WebAssembly render check
+//                  (which needs puppeteer; it prints SKIP when unavailable).
 //
 // Exits 0 when every check passes, 1 otherwise, printing a table either way.
 
@@ -207,6 +209,49 @@ if (!skipStatic) {
       assert(!v || !/frame-ancestors/i.test(v), `${h}: ${v}`);
     }
     return "no framing blockers";
+  });
+
+  // Real browser without WebAssembly (V8 --jitless removes the global): the
+  // wasm2js fallback must load, run and render. Needs puppeteer + Chrome;
+  // skipped (not failed) when either is unavailable.
+  await check("renders with no WebAssembly (JS fallback)", async () => {
+    let puppeteer;
+    try {
+      puppeteer = (await import("puppeteer")).default;
+    } catch {
+      return "SKIP (puppeteer not installed)";
+    }
+    let browser;
+    try {
+      browser = await puppeteer.launch({
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: ["--no-sandbox", "--js-flags=--jitless"],
+      });
+    } catch (e) {
+      return `SKIP (no Chrome: ${String(e.message ?? e).split("\n")[0]})`;
+    }
+    try {
+      const page = await browser.newPage();
+      const pageErrors = [];
+      let rendered = false;
+      page.on("pageerror", (e) => pageErrors.push(String(e)));
+      page.on("console", (m) => {
+        if (m.text().includes("Total rendering time")) rendered = true;
+      });
+      await page.goto(root + "/", { timeout: 60000 });
+      const wa = await page.evaluate(() => typeof WebAssembly);
+      assert(wa === "undefined", `WebAssembly is ${wa}; --jitless did not disable it`);
+      const t0 = Date.now();
+      while (!rendered && !pageErrors.length && Date.now() - t0 < 120000) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      assert(!pageErrors.length, `pageerror: ${pageErrors[0]}`);
+      assert(rendered, "no 'Total rendering time' console message within 120s");
+      return `rendered in ${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    } finally {
+      await browser.close();
+    }
   });
 }
 
