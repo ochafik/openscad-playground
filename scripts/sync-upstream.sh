@@ -217,11 +217,11 @@ mcp_smoke() {
 e2e() { CI=true NODE_ENV=production npm run test:e2e -- --runInBand; }
 
 run_check npm-ci             npm ci
+run_check server-install     bash -c 'cd server && npm ci'
 run_check build-all          env OPENSCAD_MCP_URL=/mcp npm run build:all
 run_check typecheck          npx tsc --noEmit
 run_check mcp-function       bash scripts/build-mcp-function.sh
 run_check sizes              check_sizes
-run_check server-install     bash -c 'cd server && npm ci'
 run_check server-tests       bash -c 'cd server && npm test'
 run_check mcp-smoke          mcp_smoke
 run_check e2e                e2e
