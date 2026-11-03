@@ -173,17 +173,21 @@ await check("GET /mcp (browser Accept) serves html help page", async () => {
 });
 
 await check("OPTIONS /mcp preflight", async () => {
+  // Local servers reject foreign Origins (DNS-rebinding protection), so use
+  // their own origin there; deployments are probed as a browser host would.
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(base.hostname);
+  const origin = local ? expectedOrigin : "https://claude.ai";
   const res = await http("/mcp", {
     method: "OPTIONS",
     headers: {
-      origin: "https://claude.ai",
+      origin,
       "access-control-request-method": "POST",
       "access-control-request-headers": "content-type,accept,mcp-session-id",
     },
   });
   assert(res.status === 204 || res.status === 200, `status ${res.status}`);
   const allow = res.headers.get("access-control-allow-origin");
-  assert(allow === "*" || allow === "https://claude.ai", `allow-origin ${allow}`);
+  assert(allow === "*" || allow === origin, `allow-origin ${allow}`);
   const methods = res.headers.get("access-control-allow-methods") ?? "";
   assert(/POST/i.test(methods), `allow-methods ${methods}`);
   return `allow-origin ${allow}`;
