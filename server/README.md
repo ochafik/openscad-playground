@@ -146,7 +146,23 @@ The server is a standard Node.js/Express app. Deploy `server/` with:
 
 | Tool | Description |
 |---|---|
-| `create` | Open the OpenSCAD viewer (an app tool bound to the `ui://openscad/viewer.html` resource). Accepts optional initial `source`, `vars`, and `camera`; echoes the applied values (defaults included) in `structuredContent`, which the view reads to initialize itself. |
+| `create` | Open the OpenSCAD viewer (an app tool bound to the `ui://openscad/viewer.html` resource). Accepts optional initial `source`, `vars`, and `camera`; echoes the applied values (defaults included) in `structuredContent`, which the view reads to initialize itself. The only tool the model sees. |
+| `open_openscad` | App-only (`visibility: ["app"]`). ChatGPT sidebar and conversation-tab entrypoint (`_meta["openai/ui"].entrypoints`: `global`, `thread`); called with `{}`, opens the default model. |
+| `open_scad_file` | App-only. ChatGPT file entrypoint for `.scad`; receives `{file: {name, resourceUri}}`. The view reads the file through the host (`resources/read`) and saves edits back with `openai/resources/write` when the host marks it writable. |
+
+All three share the one UI resource and carry `readOnlyHint`/`openWorldHint: false` annotations. Hosts without the OpenAI MCP Extensions ignore the `openai/*` keys.
+
+### Display mode
+
+The UI resource declares `_meta["openai/ui"] = { availableDisplayModes: ["inline", "fullscreen"], preferredDisplayMode: "fullscreen" }`, so ChatGPT opens the app fullscreen. The MCP Apps spec has no declarative preferred-display-mode field (only `availableDisplayModes` in the app's capabilities and host context), and the view never calls `requestDisplayMode("fullscreen")` on its own, so Claude and other hosts keep the inline default: 400 px, growing for the customizer (see "Inline size"). The fullscreen toolbar button still works wherever the host offers fullscreen.
+
+### Model context
+
+While the viewer is open it keeps the model informed through `ui/update-model-context` (replace semantics: each update supersedes the last). After camera moves, source or customizer edits, layout changes and render completion (debounced 0.8 s, at most one per second, only once a render has finished or failed) it sends one compact text block (file, status, camera as azimuth/elevation/distance/target/fov plus nearest preset, diagnostics, customizer values that differ from defaults, the source up to 6000 chars) and, when the host advertises `updateModelContext.image`, a JPEG screenshot (<= 768 px, shrunk until under ~150 KB). With the ChatGPT `openai/modelContext` extension the blocks get an "OpenSCAD viewer" group and titles, and the text is marked assistant-only. Hosts that do not advertise `updateModelContext` get nothing. Implementation: `src/state/mcp-context.ts`.
+
+### State persistence
+
+The view saves a versioned JSON (sources, active file, camera, customizer values, layout, axes; capped at 64 KB, biggest sources dropped first) debounced after changes and on `pagehide`, to the host (`ui/set-view-state`) and to `localStorage` (both best effort, errors ignored). The host API is not standardised yet (modelcontextprotocol/ext-apps#417), so the names are assumed: initial state is read from `hostContext.viewState` then `hostInfo.viewState`, and the writer stops for good after a "method not found". On mount the saved state is restored only when the mount carries the same tool invocation it was saved for (fingerprint of the tool input); a different `create({source})` or a file entrypoint always wins. Precedence: this invocation's explicit input > host state > localStorage > defaults. Implementation: `src/state/mcp-viewstate.ts`.
 
 ### App-registered tools
 
@@ -163,7 +179,7 @@ The view registers these with the host during the `ui/initialize` handshake (def
 | `undo_source_edit` | Undo the last tool edit (history of 20; refuses if the file changed since, e.g. by the user). |
 | `get_viewer_state` | Active file, file list, render status, errors/warnings (`file:line:col`), OpenSCAD log tail, customizer parameters, camera, view options. |
 | `render_model` | Render and wait for it: `mode` `full` (default, F6) or `preview` (F5). |
-| `download_model` | Export the rendered model (`format`: stl default, 3mf, glb, off; svg/dxf for 2D; `filename`) and deliver it. `delivery`: `download` (host `ui/download-file`, host save dialog), `message` (chat attachment via `ui/message`), `return` (in the tool result), `link` (a `resource_link` block with a `data:` URI, max 512 KB, via the first channel that takes it) or `auto` (default). Auto tries, in order: download as embedded resource, download as resource link, message embedded, message link (only if the host advertises `message.resourceLink`), result embedded, result link; a thrown error (host rejects that content form) moves to the next step, an explicit refusal stops. Does a full render first when only a preview exists. Size caps: download 32 MB, message 4 MB, return 1 MB, links 512 KB. Reports filename, bytes, format, channel and form. |
+| `download_model` | Export the rendered model (`format`: stl default, 3mf, glb, off; svg/dxf for 2D; **`scad`: the OpenSCAD source of `path` (default the active file), no render needed, `text/x-openscad;charset=utf-8`;** `filename`) and deliver it. `delivery`: `download` (host `ui/download-file`, host save dialog), `message` (chat attachment via `ui/message`), `return` (in the tool result), `link` (a `resource_link` block with a `data:` URI, max 512 KB, via the first channel that takes it) or `auto` (default). Auto tries, in order: download as embedded resource, download as resource link, message embedded, message link (only if the host advertises `message.resourceLink`), result embedded, result link; a thrown error (host rejects that content form) moves to the next step, an explicit refusal stops. Does a full render first when only a preview exists. Size caps: download 32 MB, message 4 MB, return 1 MB, links 512 KB. Reports filename, bytes, format, channel and form. |
 | `get_parameters` | The active file's customizer schema: name, type, caption, group, default, current value (and whether it differs), min/max/step or dropdown options (value + label). Says so when the file has none; reflects source edits after the re-render. |
 | `set_parameters` | Set one or many values (same path as the customizer UI; unchanged values are skipped). All values are validated first; if any is unknown/invalid nothing changes and every problem is listed with the allowed range/options. Waits for the render. |
 | `reset_parameters` | Reset all (or the named) parameters to the defaults in the source. |
@@ -176,7 +192,9 @@ The view registers these with the host during the `ui/initialize` handshake (def
 
 The embed toolbar also has **Render** (full render, spinner while running, result announced) and **Download** (format menu; uses the host's `ui/download-file`, else attaches the file to the chat, else shows a manual save link, since the sandboxed iframe cannot save files itself).
 
-The viewer opens in **embed mode** (see the main README): only the 3D view and a top-right toolbar (customizer toggle, copy source, fullscreen when the host offers it, exit to the full editor). The customizer is a translucent side sheet docked on the right that overlays, and never resizes, the viewer; it closes with the toggle, Escape, or a tap outside on small screens. `set_layout` and the toolbar share the same state, so `get_viewer_state` always reports what the user sees.
+The toolbar's **Download .scad** button and `download_model format:"scad"` use the same delivery chain as model downloads (host `ui/download-file`, resource link, chat attachment, tool result, manual-save dialog). Multi-file projects: the active file (or `path`) is exported; there is no "all files (.zip)" option.
+
+The viewer opens in **embed mode** (see the main README): only the 3D view and a top-right toolbar (customizer toggle, render, download model, **Download .scad** for the active file's source, fullscreen when the host offers it, exit to the full editor). The customizer is a translucent side sheet docked on the right that overlays, and never resizes, the viewer; it closes with the toggle, Escape, or a tap outside on small screens. `set_layout` and the toolbar share the same state, so `get_viewer_state` always reports what the user sees.
 
 Parameter presets are not exposed: the app has no preset concept (only the values the customizer holds), so there are no `list_presets`/`apply_preset` tools.
 
