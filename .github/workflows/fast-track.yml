@@ -1,0 +1,110 @@
+name: Fast-track to production
+
+# EMERGENCY ONLY: fast-forwards deploy/vercel to a commit without the staging
+# stage, then smokes production. Only users with write access can dispatch it.
+# See docs/DEPLOYMENT_AUTOMATION.md ("Emergency procedure").
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit sha or branch to ship (must fast-forward deploy/vercel)
+        type: string
+        default: staging
+      reason:
+        description: Why this bypasses staging (recorded in the run summary)
+        type: string
+        required: true
+      skip_checks:
+        description: Skip the quick build/test gate
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fast-track
+  cancel-in-progress: false
+
+env:
+  PRODUCTION_URL: ${{ vars.PRODUCTION_URL || 'https://openscad.ochafik.com' }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  ship:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      INPUT_REF: ${{ inputs.ref }}
+      REASON: ${{ inputs.reason }}
+      SKIP_CHECKS: ${{ inputs.skip_checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Resolve and verify the commit
+        id: ref
+        run: |
+          set -eu
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+          sha="$(git rev-parse --verify "origin/$INPUT_REF^{commit}" 2>/dev/null || git rev-parse --verify "$INPUT_REF^{commit}")"
+          tip="$(git rev-parse origin/deploy/vercel)"
+          git merge-base --is-ancestor "$tip" "$sha" || { echo "::error::$sha does not fast-forward deploy/vercel ($tip)"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Fast-track by @$GITHUB_ACTOR"
+            echo "- reason: $REASON"
+            echo "- ref: \`$INPUT_REF\` -> \`$sha\` (deploy/vercel was \`$tip\`)"
+            echo "- checks skipped: $SKIP_CHECKS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Quick gate
+        if: env.SKIP_CHECKS != 'true'
+        run: |
+          set -eu
+          git checkout -q --detach "${{ steps.ref.outputs.sha }}"
+          npm ci
+          (cd server && npm ci && npm test)
+          npx tsc --noEmit
+          bash scripts/build-mcp-function.sh
+
+      - name: Push to deploy/vercel
+        env:
+          SHA: ${{ steps.ref.outputs.sha }}
+        run: |
+          if [ "$(git rev-parse origin/deploy/vercel)" = "$SHA" ]; then
+            echo "deploy/vercel already at $SHA; only smoking production."
+          else
+            git push origin "$SHA:refs/heads/deploy/vercel"   # no --force: must fast-forward
+          fi
+
+      - name: Smoke production (waits for the new deployment)
+        env:
+          SHA: ${{ steps.ref.outputs.sha }}
+        run: |
+          set +e
+          node scripts/smoke-deployment.mjs "$PRODUCTION_URL" --expect-sha "$SHA" --wait-s 1200 2>&1 | tee smoke.log
+          rc=${PIPESTATUS[0]}
+          { echo '### Production smoke'; echo '```'; cat smoke.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Open or update issue
+        if: failure()
+        env:
+          SHA: ${{ steps.ref.outputs.sha }}
+        run: |
+          {
+            echo "Fast-track of $SHA (reason: $REASON) failed its production smoke test."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "**Roll back:** Vercel dashboard > Deployments > previous production deployment > Instant Rollback."
+          } > issue.md
+          bash scripts/upsert-issue.sh open "Production smoke failed for ${SHA:0:9}" issue.md

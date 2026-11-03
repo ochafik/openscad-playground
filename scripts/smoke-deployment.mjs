@@ -10,6 +10,9 @@
 //   --host-header  Send this Host header on every request (emulates a public
 //                  host against a local server; the expected origin then
 //                  defaults to http(s)://HOST).
+//   --expect-sha S Require /version.json (written at build time) to report commit S.
+//   --wait-s N     With --expect-sha: poll /version.json up to N seconds until it
+//                  matches (waiting for a deployment to go live) before testing.
 //   --skip-static  Only run the MCP checks (e.g. server without OPENSCAD_SERVE_DIST).
 //
 // Exits 0 when every check passes, 1 otherwise, printing a table either way.
@@ -31,6 +34,8 @@ const flag = (name) => {
 
 const originOpt = opt("--origin");
 const hostHeader = opt("--host-header");
+const expectSha = opt("--expect-sha");
+const waitS = Number(opt("--wait-s") ?? 0);
 const timeoutMs = Number(opt("--timeout-ms") ?? 30000);
 const skipStatic = flag("--skip-static");
 const base = new URL(args[0] ?? "https://openscad.ochafik.com");
@@ -100,6 +105,35 @@ async function rpc(method, params) {
   const body = await readRpc(res);
   assert(!body.error, `${method}: ${JSON.stringify(body.error)}`);
   return body.result;
+}
+
+async function fetchVersion() {
+  const res = await http("/version.json", { headers: { "cache-control": "no-cache" } });
+  assert(res.status === 200, `/version.json status ${res.status}`);
+  return res.json();
+}
+
+if (expectSha && waitS > 0) {
+  const deadline = Date.now() + waitS * 1000;
+  let last = "";
+  while (Date.now() < deadline) {
+    try {
+      last = (await fetchVersion()).sha;
+      if (last === expectSha) break;
+    } catch (e) {
+      last = String(e.message ?? e);
+    }
+    await new Promise((r) => setTimeout(r, 15000));
+  }
+  console.log(`waited for ${expectSha}; last seen: ${last}`);
+}
+
+if (expectSha) {
+  await check("deployed commit matches tested sha", async () => {
+    const v = await fetchVersion();
+    assert(v.sha === expectSha, `deployed ${v.sha}, expected ${expectSha}`);
+    return `${v.sha.slice(0, 9)} (${v.ref})`;
+  });
 }
 
 // ---- static site -----------------------------------------------------------

@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Merges upstream/main into the deploy branch, verifies the result, and pushes it.
+# Merges upstream/main into the deploy branch, verifies the result, and pushes the
+# green candidate to the STAGING branch (promotion to production is done by
+# .github/workflows/smoke-deployment.yml after the staging deployment is smoked).
 #
 #   bash scripts/sync-upstream.sh
 #
 # Never rebases and never force-pushes: the candidate is a merge commit on top of
-# the deploy branch, pushed as a plain fast-forward only if every check passes.
+# the deploy branch, pushed only if every check passes. `staging` is disposable
+# (it may hold an older, unpromoted candidate), so it is replaced with
+# --force-with-lease; deploy/vercel itself is never pushed here.
 # Used by .github/workflows/sync-upstream.yml; see docs/DEPLOYMENT_AUTOMATION.md.
 #
 # Environment (all optional):
 #   DRY_RUN=true          do everything except the final push
 #   MIN_AGE_HOURS=0       only merge upstream commits older than N hours
 #   TARGET_BRANCH         deploy branch name (default deploy/vercel)
+#   STAGING_BRANCH        where green candidates go (default staging)
+#   FORCE=true            re-run even if staging already has this upstream commit
 #   BASE_REF              what to merge into (default origin/$TARGET_BRANCH)
 #   UPSTREAM_URL          added as remote `upstream` if missing
 #   LOG_DIR               where logs, result.env and issue.md go (default: mktemp)
@@ -27,6 +33,8 @@ set -uo pipefail
 
 TARGET_BRANCH="${TARGET_BRANCH:-deploy/vercel}"
 ORIGIN_REMOTE="${ORIGIN_REMOTE:-origin}"
+STAGING_BRANCH="${STAGING_BRANCH:-staging}"
+FORCE="${FORCE:-false}"
 BASE_REF="${BASE_REF:-${ORIGIN_REMOTE}/${TARGET_BRANCH}}"
 UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/openscad/openscad-playground.git}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
@@ -113,6 +121,15 @@ if git merge-base --is-ancestor "${UPSTREAM_SHA}" "${BASE_SHA}"; then
   echo "Already contains upstream ${UPSTREAM_SHA:0:9}; nothing to do."
   STATUS="up-to-date"; exit 0
 fi
+STAGING_SHA=""
+if git fetch --no-tags "${ORIGIN_REMOTE}" "${STAGING_BRANCH}:refs/remotes/${ORIGIN_REMOTE}/${STAGING_BRANCH}" 2>/dev/null; then
+  STAGING_SHA="$(git rev-parse "refs/remotes/${ORIGIN_REMOTE}/${STAGING_BRANCH}")"
+  if [ "${FORCE}" != "true" ] && git merge-base --is-ancestor "${UPSTREAM_SHA}" "${STAGING_SHA}" \
+     && git merge-base --is-ancestor "${BASE_SHA}" "${STAGING_SHA}"; then
+    echo "${STAGING_BRANCH} (${STAGING_SHA:0:9}) already contains upstream ${UPSTREAM_SHA:0:9}; awaiting promotion."
+    STATUS="up-to-date"; exit 0
+  fi
+fi
 NEW_COMMITS="$(git rev-list --count "${BASE_SHA}..${UPSTREAM_SHA}")"
 log "Merging ${NEW_COMMITS} upstream commit(s) up to ${UPSTREAM_SHA:0:9} into ${BASE_REF} (${BASE_SHA:0:9})"
 
@@ -174,7 +191,7 @@ run_check() {
     tail -n 40 "${LOG_DIR}/${name}.log" | sed 's/^/    | /'
     STATUS="failed"; FAILED_STEP="${name}"; FAILED_LOG="${LOG_DIR}/${name}.log"
     write_issue "Upstream sync failed" <<MD
-Merging \`upstream/${UPSTREAM_BRANCH}\` (${UPSTREAM_SHA}) into \`${TARGET_BRANCH}\` (${BASE_SHA:0:9}) produced a candidate that fails the check **${name}**. Nothing was pushed to \`${TARGET_BRANCH}\`.
+Merging \`upstream/${UPSTREAM_BRANCH}\` (${UPSTREAM_SHA}) into \`${TARGET_BRANCH}\` (${BASE_SHA:0:9}) produced a candidate that fails the check **${name}**. Nothing was pushed to \`${STAGING_BRANCH}\` or \`${TARGET_BRANCH}\`.
 
 Last lines of the log:
 
@@ -206,7 +223,8 @@ mcp_smoke() {
     kill -0 "${pid}" 2>/dev/null || { echo "server exited early"; cat "${LOG_DIR}/server.log"; return 1; }
     sleep 1
   done
-  node scripts/smoke-deployment.mjs "http://127.0.0.1:${port}" --host-header "127.0.0.1:${port}" || rc=$?
+  node scripts/smoke-deployment.mjs "http://127.0.0.1:${port}" --host-header "127.0.0.1:${port}" \
+    --expect-sha "$(git rev-parse HEAD)" || rc=$?
   # tsx runs node as a child of npx; stop the whole group.
   pkill -P "${pid}" 2>/dev/null || true
   kill "${pid}" 2>/dev/null || true
@@ -223,22 +241,28 @@ run_check typecheck          npx tsc --noEmit
 run_check mcp-function       bash scripts/build-mcp-function.sh
 run_check sizes              check_sizes
 run_check server-tests       bash -c 'cd server && npm test'
+run_check version-file       env VERCEL_GIT_COMMIT_SHA="$(git rev-parse HEAD)" node scripts/write-version.mjs
 run_check mcp-smoke          mcp_smoke
 run_check e2e                e2e
 
 # ---------------------------------------------------------------- publish
 if [ "${DRY_RUN}" = "true" ]; then
   STATUS="synced"
-  log "DRY RUN: all checks passed; would push ${CANDIDATE_SHA:0:9} to ${ORIGIN_REMOTE}/${TARGET_BRANCH}"
+  log "DRY RUN: all checks passed; would push ${CANDIDATE_SHA:0:9} to ${ORIGIN_REMOTE}/${STAGING_BRANCH}"
   exit 0
 fi
-log "Pushing ${CANDIDATE_SHA:0:9} to ${ORIGIN_REMOTE}/${TARGET_BRANCH} (fast-forward only)"
-if git push "${ORIGIN_REMOTE}" "${CANDIDATE_BRANCH}:refs/heads/${TARGET_BRANCH}"; then
+log "Pushing ${CANDIDATE_SHA:0:9} to ${ORIGIN_REMOTE}/${STAGING_BRANCH}"
+if [ -n "${STAGING_SHA}" ]; then
+  lease="--force-with-lease=refs/heads/${STAGING_BRANCH}:${STAGING_SHA}"
+else
+  lease="--force-with-lease=refs/heads/${STAGING_BRANCH}:"
+fi
+if git push "${lease}" "${ORIGIN_REMOTE}" "${CANDIDATE_BRANCH}:refs/heads/${STAGING_BRANCH}"; then
   STATUS="pushed"
 else
   STATUS="failed"; FAILED_STEP="push"
   write_issue "Upstream sync failed" <<MD
-All checks passed for the merge of \`upstream/${UPSTREAM_BRANCH}\` (${UPSTREAM_SHA}), but pushing to \`${TARGET_BRANCH}\` was rejected (the branch moved, or the token lacks permission).
+All checks passed for the merge of \`upstream/${UPSTREAM_BRANCH}\` (${UPSTREAM_SHA}), but pushing to \`${STAGING_BRANCH}\` was rejected (the branch moved concurrently, or the token lacks permission).
 MD
   exit 11
 fi

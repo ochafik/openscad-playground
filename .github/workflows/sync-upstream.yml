@@ -1,8 +1,10 @@
 name: Sync upstream
 
 # Merges openscad/openscad-playground main into this fork's deploy branch,
-# runs the full verification, and pushes only if everything is green. Vercel's
-# GitHub integration then deploys the push. See docs/DEPLOYMENT_AUTOMATION.md.
+# runs the full verification, and pushes the green candidate to the `staging`
+# branch (Vercel deploys it as a preview at staging.openscad.ochafik.com).
+# smoke-deployment.yml then smokes staging and promotes it to deploy/vercel.
+# See docs/DEPLOYMENT_AUTOMATION.md.
 #
 # Scheduled workflows only run from the repository's default branch, so the
 # fork's default branch must be deploy/vercel.
@@ -14,6 +16,10 @@ on:
     inputs:
       dry_run:
         description: Run every check but do not push, open issues or create branches
+        type: boolean
+        default: false
+      force:
+        description: Re-run even if staging already contains the latest upstream commit
         type: boolean
         default: false
       min_age_hours:
@@ -36,6 +42,7 @@ jobs:
     env:
       TARGET_BRANCH: deploy/vercel
       DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+      FORCE: ${{ inputs.force && 'true' || 'false' }}
       MIN_AGE_HOURS: ${{ inputs.min_age_hours || vars.SYNC_MIN_AGE_HOURS || '0' }}
       # Optional PAT with the `workflow` scope; without it, merges touching
       # .github/workflows are reported instead of pushed.

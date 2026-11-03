@@ -1,75 +1,240 @@
-name: Smoke test deployment
+name: Smoke test and promote
 
-# Runs after Vercel (GitHub integration) reports a successful Production
-# deployment, or on demand against any URL. Vercel names the environment
-# "Production" (or "Production – <project>" when a repo has several projects).
+# Stage 2 of the pipeline (see docs/DEPLOYMENT_AUTOMATION.md).
+#  - Vercel deploys branch `staging` as a Preview at STAGING_URL; its
+#    deployment_status=success event triggers: smoke staging -> promote
+#    (fast-forward deploy/vercel to the tested sha) -> wait for the production
+#    deployment of that sha and smoke it.
+#  - A Production deployment_status (manual push, fast-track) gets a plain smoke.
+#  - workflow_dispatch: smoke any URL; with promote=true also promote a sha.
 
 on:
   deployment_status:
   workflow_dispatch:
     inputs:
       url:
-        description: Site to test
+        description: Site to smoke (default staging)
         type: string
-        default: https://openscad.ochafik.com
+        default: ""
+      sha:
+        description: Commit the site must be running (required for promote)
+        type: string
+        default: ""
+      promote:
+        description: After a green smoke, fast-forward deploy/vercel to sha and smoke production
+        type: boolean
+        default: false
+      dry_run:
+        description: With promote, check everything but do not push
+        type: boolean
+        default: true
 
 permissions:
   contents: read
   issues: write
 
 concurrency:
-  group: smoke-deployment
+  group: smoke-${{ github.event.deployment.id || github.run_id }}
   cancel-in-progress: false
 
+env:
+  STAGING_URL: ${{ vars.STAGING_URL || 'https://staging.openscad.ochafik.com' }}
+  PRODUCTION_URL: ${{ vars.PRODUCTION_URL || 'https://openscad.ochafik.com' }}
+  GH_TOKEN: ${{ github.token }}
+
 jobs:
-  smoke:
+  staging:
+    # Vercel names the environment "Preview" ("Preview – <project>" with several
+    # projects). Whether the deployment is *the* staging head is checked below
+    # by sha, so other previews (PR branches, sync-failed/*) are ignored.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.deployment_status.state == 'success' &&
-       startsWith(github.event.deployment_status.environment, 'Production'))
+       startsWith(github.event.deployment_status.environment, 'Preview'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    outputs:
+      proceed: ${{ steps.plan.outputs.proceed }}
+      sha: ${{ steps.plan.outputs.sha }}
     env:
-      # Always test the production alias, never the per-deployment URL: that
-      # one can sit behind Vercel deployment protection.
-      SMOKE_URL: ${{ inputs.url || 'https://openscad.ochafik.com' }}
-      GH_TOKEN: ${{ github.token }}
-      SHA: ${{ github.event.deployment.sha || github.sha }}
+      EVENT_SHA: ${{ github.event.deployment.sha }}
+      INPUT_URL: ${{ inputs.url }}
+      INPUT_SHA: ${{ inputs.sha }}
+      INPUT_PROMOTE: ${{ inputs.promote }}
+    steps:
+      - name: Decide what to test
+        id: plan
+        run: |
+          set -eu
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            sha="$INPUT_SHA"
+            echo "url=${INPUT_URL:-$STAGING_URL}" >> "$GITHUB_OUTPUT"
+            if [ "$INPUT_PROMOTE" = true ]; then
+              [ -n "$sha" ] || { echo "::error::promote needs a sha"; exit 1; }
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            sha="$EVENT_SHA"
+            echo "url=$STAGING_URL" >> "$GITHUB_OUTPUT"
+            head="$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" refs/heads/staging | cut -f1)"
+            if [ "$head" = "$sha" ]; then
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Deployment $sha is not the head of staging (${head:-no staging branch}); ignoring."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              echo "ignore=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: steps.plan.outputs.ignore != 'true'
+        with:
+          ref: ${{ steps.plan.outputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        if: steps.plan.outputs.ignore != 'true'
+        with:
+          node-version: "24"
+
+      - name: Smoke staging
+        if: steps.plan.outputs.ignore != 'true'
+        env:
+          URL: ${{ steps.plan.outputs.url }}
+          SHA: ${{ steps.plan.outputs.sha }}
+        run: |
+          set +e
+          args=()
+          [ -n "$SHA" ] && args=(--expect-sha "$SHA" --wait-s 180)
+          node scripts/smoke-deployment.mjs "$URL" "${args[@]}" 2>&1 | tee smoke.log
+          rc=${PIPESTATUS[0]}
+          { echo '### Staging smoke'; echo '```'; cat smoke.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Open or update issue
+        if: failure() && steps.plan.outputs.ignore != 'true' && steps.plan.outputs.sha != ''
+        env:
+          SHA: ${{ steps.plan.outputs.sha }}
+        run: |
+          {
+            echo "Staging smoke test failed for $SHA; **not promoted** (production unchanged)."
+            echo
+            echo '```'
+            tail -n 60 smoke.log
+            echo '```'
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > issue.md
+          bash scripts/upsert-issue.sh open "Staging smoke failed for ${SHA:0:9}" issue.md
+
+  promote:
+    needs: staging
+    if: needs.staging.result == 'success' && needs.staging.outputs.proceed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      issues: write
+    env:
+      SHA: ${{ needs.staging.outputs.sha }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.deployment.sha || github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+
+      - name: Fast-forward deploy/vercel to the tested commit
+        run: |
+          set -eu
+          git fetch origin deploy/vercel staging
+          git cat-file -e "$SHA^{commit}"
+          if [ "$(git rev-parse origin/staging)" != "$SHA" ] && ! git merge-base --is-ancestor "$SHA" origin/staging; then
+            echo "::error::staging moved away from $SHA; refusing to promote a stale commit"; exit 1
+          fi
+          if ! git merge-base --is-ancestor origin/deploy/vercel "$SHA"; then
+            echo "::error::$SHA is not a fast-forward of deploy/vercel ($(git rev-parse origin/deploy/vercel)); not promoting"; exit 1
+          fi
+          if [ "$DRY_RUN" = true ]; then
+            echo "[dry run] would push $SHA to deploy/vercel"
+          else
+            git push origin "$SHA:refs/heads/deploy/vercel"   # no --force: must fast-forward
+          fi
+          echo "### Promoted \`$SHA\` to deploy/vercel (dry run: $DRY_RUN)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke production (waits for the new deployment)
+        if: env.DRY_RUN != 'true'
+        run: |
+          set +e
+          node scripts/smoke-deployment.mjs "$PRODUCTION_URL" --expect-sha "$SHA" --wait-s 1200 2>&1 | tee smoke.log
+          rc=${PIPESTATUS[0]}
+          { echo '### Production smoke'; echo '```'; cat smoke.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Open or update issue
+        if: failure() && env.DRY_RUN != 'true'
+        run: |
+          {
+            echo "Production smoke test failed after promoting $SHA (or the promotion itself failed)."
+            echo
+            echo '```'
+            tail -n 60 smoke.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "**Roll back:** Vercel dashboard > Deployments > previous production deployment > Instant Rollback, then \`git revert\` on deploy/vercel."
+          } > issue.md
+          bash scripts/upsert-issue.sh open "Production smoke failed for ${SHA:0:9}" issue.md
+
+  production:
+    # A Production deployment that did not come from the promote job above
+    # (manual push, fast-track): plain smoke with retries.
+    if: >-
+      github.event_name == 'deployment_status' &&
+      github.event.deployment_status.state == 'success' &&
+      startsWith(github.event.deployment_status.environment, 'Production')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SHA: ${{ github.event.deployment.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.deployment.sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
-      - name: Smoke test
-        id: smoke
+      - name: Smoke production
         run: |
           set +e
-          # The alias can lag the status by a few seconds: retry.
           for attempt in 1 2 3; do
-            node scripts/smoke-deployment.mjs "$SMOKE_URL" 2>&1 | tee smoke.log
+            node scripts/smoke-deployment.mjs "$PRODUCTION_URL" --expect-sha "$SHA" --wait-s 120 2>&1 | tee smoke.log
             rc=${PIPESTATUS[0]}
             [ "$rc" -eq 0 ] && break
             [ "$attempt" -lt 3 ] && sleep 20
           done
-          echo "rc=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
 
       - name: Open or update issue
-        if: failure() && steps.smoke.outputs.rc != '' && steps.smoke.outputs.rc != '0'
+        if: failure()
         run: |
           {
-            echo "Smoke test of $SMOKE_URL failed for ${SHA}."
+            echo "Production smoke test failed for $SHA."
             echo
             echo '```'
             tail -n 60 smoke.log
             echo '```'
             echo
-            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            echo "Roll back: Vercel dashboard > Deployments > previous production deployment > Instant Rollback."
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "**Roll back:** Vercel dashboard > Deployments > previous production deployment > Instant Rollback."
           } > issue.md
-          bash scripts/upsert-issue.sh open "Smoke test failed for ${SHA:0:9}" issue.md
+          bash scripts/upsert-issue.sh open "Production smoke failed for ${SHA:0:9}" issue.md

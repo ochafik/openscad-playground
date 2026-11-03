@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "installCommand": "npm ci && cd server && npm ci",
-  "buildCommand": "bash scripts/vercel-prebuild.sh && OPENSCAD_MCP_URL=/mcp npm run build:all && bash scripts/build-mcp-function.sh",
+  "buildCommand": "bash scripts/vercel-prebuild.sh && OPENSCAD_MCP_URL=/mcp npm run build:all && node scripts/write-version.mjs && bash scripts/build-mcp-function.sh",
   "outputDirectory": "dist",
   "functions": {
     "api/mcp.ts": {
