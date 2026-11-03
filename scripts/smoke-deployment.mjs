@@ -17,6 +17,8 @@
 //
 // Exits 0 when every check passes, 1 otherwise, printing a table either way.
 
+import { createHash } from "node:crypto";
+
 const args = process.argv.slice(2);
 const opt = (name) => {
   const i = args.indexOf(name);
@@ -166,6 +168,20 @@ if (!skipStatic) {
     const buf = new Uint8Array(await res.arrayBuffer());
     assert(buf[0] === 0 && buf[1] === 0x61 && buf[2] === 0x73 && buf[3] === 0x6d, "missing \\0asm magic");
     return `${buf.length} bytes`;
+  });
+
+  await check("GET /openscad.fallback.js is the pinned wasm2js build", async () => {
+    const res = await http("/openscad.fallback.js");
+    assert(res.status === 200, `status ${res.status}`);
+    const ct = res.headers.get("content-type") ?? "";
+    assert(/javascript/.test(ct), `content-type ${ct}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    assert(buf.length > 10e6, `only ${buf.length} bytes (expected >10 MB)`);
+    const sha = createHash("sha256").update(buf).digest("hex");
+    // Deployments built without the fallback (OPENSCAD_FALLBACK=off) carry no pin.
+    const pin = (await fetchVersion().catch(() => ({}))).fallback?.sha256;
+    if (pin) assert(sha === pin, `sha256 ${sha} != pinned ${pin}`);
+    return `${(buf.length / 1e6).toFixed(1)} MB${pin ? ", matches pin" : ", no pin in version.json"}`;
   });
 
   await check("GET /libraries/index.json has expected shape", async () => {

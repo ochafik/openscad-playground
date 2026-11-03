@@ -24,10 +24,14 @@
 #   ALLOW_WORKFLOW_CHANGES=true  allow pushing merges that touch .github/workflows
 #                         (needs a token with the `workflow` scope; GITHUB_TOKEN can't)
 #   RUN_URL               link to the CI run, included in issue.md
+#   PLAN_ONLY=true        stop after the merge and the fallback pin (no checks, no push);
+#                         used by the workflow to learn whether the wasm2js fallback
+#                         has to be built first
 #
 # Exit codes: 0 up to date / synced / pushed; 10 merge conflict; 11 a check
 # failed; 12 merge touches workflow files without permission to push it;
-# 1 unexpected error. LOG_DIR/result.env always records STATUS, FAILED_STEP, ...
+# 13 the merged recipe has no wasm2js fallback release yet (build it with
+# .github/workflows/publish-fallback.yml, then re-run); 1 unexpected error. LOG_DIR/result.env always records STATUS, FAILED_STEP, ...
 
 set -uo pipefail
 
@@ -40,6 +44,7 @@ UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/openscad/openscad-playground.gi
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 DRY_RUN="${DRY_RUN:-false}"
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-0}"
+PLAN_ONLY="${PLAN_ONLY:-false}"
 SKIP_CHECKS="${SKIP_CHECKS:-}"
 ALLOW_WORKFLOW_CHANGES="${ALLOW_WORKFLOW_CHANGES:-false}"
 CANDIDATE_BRANCH="sync/candidate"
@@ -64,6 +69,7 @@ MERGED_SHA=""
 CANDIDATE_SHA=""
 ISSUE_TITLE=""
 FAILED_LOG=""
+FALLBACK_TAG=""
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -76,6 +82,7 @@ write_result() {
     echo "merged_sha=${MERGED_SHA}"
     echo "candidate_sha=${CANDIDATE_SHA}"
     echo "issue_title=${ISSUE_TITLE}"
+    echo "fallback_tag=${FALLBACK_TAG}"
     echo "log_dir=${LOG_DIR}"
   } >"${RESULT_FILE}"
 }
@@ -178,6 +185,43 @@ fi
 # ---------------------------------------------------------------- checks
 skipped() { case ",${SKIP_CHECKS}," in *",$1,"*) return 0;; esac; return 1; }
 
+# ---------------------------------------------------------------- wasm2js fallback pin
+# The deployment downloads a prebuilt fallback (GitHub Release fallback-<input
+# hash>, built by publish-fallback.yml) pinned in scripts/fallback.json, which
+# is committed into the candidate. Its release must exist before the candidate
+# is pushed; if not, the workflow builds it and runs the sync again.
+if skipped fallback-pin; then
+  log "Fallback pin: SKIPPED"
+else
+  log "Pinning the wasm2js fallback"
+  FALLBACK_TAG="$(bash scripts/fallback-input-hash.sh --tag)"
+  pin_rc=0
+  bash scripts/pin-fallback.sh >"${LOG_DIR}/fallback-pin.log" 2>&1 || pin_rc=$?
+  cat "${LOG_DIR}/fallback-pin.log"
+  if [ "${pin_rc}" -eq 3 ]; then
+    STATUS="needs-fallback"; FAILED_STEP="fallback-pin"
+    echo "No release ${FALLBACK_TAG}: the fallback must be built first."
+    exit 13
+  elif [ "${pin_rc}" -ne 0 ]; then
+    STATUS="failed"; FAILED_STEP="fallback-pin"; FAILED_LOG="${LOG_DIR}/fallback-pin.log"
+    write_issue "Upstream sync failed" <<MD
+Merging \`upstream/${UPSTREAM_BRANCH}\` (${UPSTREAM_SHA}) into \`${TARGET_BRANCH}\` could not pin the wasm2js fallback (\`scripts/pin-fallback.sh\` exit ${pin_rc}):
+
+\`\`\`
+$(tail -n 60 "${FAILED_LOG}")
+\`\`\`
+MD
+    exit 11
+  fi
+  CANDIDATE_SHA="$(git rev-parse HEAD)"
+fi
+
+if [ "${PLAN_ONLY}" = "true" ]; then
+  STATUS="planned"
+  log "PLAN_ONLY: merge ok, fallback ${FALLBACK_TAG:-skipped} available"
+  exit 0
+fi
+
 # run_check <name> <command...>: logs to LOG_DIR/<name>.log, stops the sync on failure.
 run_check() {
   local name="$1"; shift
@@ -236,6 +280,7 @@ e2e() { CI=true NODE_ENV=production npm run test:e2e -- --runInBand; }
 
 run_check npm-ci             npm ci
 run_check server-install     bash -c 'cd server && npm ci'
+run_check fallback-fetch     bash scripts/vercel-prebuild.sh
 run_check build-all          env OPENSCAD_MCP_URL=/mcp npm run build:all
 run_check typecheck          npx tsc --noEmit
 run_check mcp-function       bash scripts/build-mcp-function.sh

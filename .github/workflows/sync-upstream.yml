@@ -36,7 +36,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Merge only, to learn whether the merged recipe needs a wasm2js fallback that
+  # has not been built yet (a cold build takes ~25 minutes, so it runs as its own
+  # job and the sync below simply runs afterwards, finding the release).
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      needs_fallback: ${{ steps.plan.outputs.status == 'needs-fallback' }}
+    env:
+      TARGET_BRANCH: deploy/vercel
+      PLAN_ONLY: "true"
+      FORCE: ${{ inputs.force && 'true' || 'false' }}
+      MIN_AGE_HOURS: ${{ inputs.min_age_hours || vars.SYNC_MIN_AGE_HOURS || '0' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Merge and look for the fallback release
+        id: plan
+        run: |
+          set +e
+          LOG_DIR="$RUNNER_TEMP/plan-logs" bash scripts/sync-upstream.sh
+          cat "$RUNNER_TEMP/plan-logs/result.env" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Publish the candidate for the fallback build
+        if: steps.plan.outputs.status == 'needs-fallback' && inputs.dry_run != true
+        run: git push --force origin sync/candidate:refs/heads/sync-pending
+
+  fallback:
+    needs: plan
+    if: needs.plan.outputs.needs_fallback == 'true' && inputs.dry_run != true
+    uses: ./.github/workflows/publish-fallback.yml
+    with:
+      ref: sync-pending
+    permissions:
+      contents: write
+
+  fallback-failed:
+    needs: fallback
+    if: always() && needs.fallback.result == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: |
+          printf 'Building the wasm2js fallback for the upstream merge failed, so nothing was pushed to staging.\n\nRun: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > body.md
+          bash scripts/upsert-issue.sh open "Upstream sync failed: wasm2js fallback build" body.md
+
   sync:
+    needs: [plan, fallback]
+    # Skipped fallback (nothing to build) is fine; a failed one is not.
+    if: always() && needs.plan.result == 'success' && needs.fallback.result != 'failure' && needs.fallback.result != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -102,6 +159,10 @@ jobs:
       - name: Prune old sync-failed branches (keep 5)
         if: always() && env.DRY_RUN != 'true'
         run: bash scripts/prune-sync-failed.sh
+
+      - name: Delete the temporary fallback-build branch
+        if: always() && needs.plan.outputs.needs_fallback == 'true' && env.DRY_RUN != 'true'
+        run: git push origin --delete sync-pending || true
 
       - name: Upload logs
         if: always()

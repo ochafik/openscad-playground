@@ -92,6 +92,41 @@ Emergency bypass: `fast-track.yml` (below).
    sha, so such deployments report the local HEAD or `unknown`.
 6. **`scripts/upsert-issue.sh`**: open-or-comment / close issues via `gh`.
 
+## The wasm2js fallback (WebAssembly-less browsers)
+
+`openscad.fallback.js` (~22 MB, see `docs/WASM_FALLBACK.md`) needs Docker-class
+tooling to build, which Vercel does not have, so it is built in GitHub Actions
+and delivered to the Vercel build as a pinned download:
+
+1. **Input hash** (`scripts/fallback-input-hash.sh`): sha256 over the git blobs of
+   `scripts/build-wasm-fallback.sh` (pins the OpenSCAD and Binaryen refs) and
+   `scripts/patches/**`, the same inputs `build-fallback.yml` caches on.
+2. **`publish-fallback.yml`** builds the recipe at a `ref` and publishes the
+   GitHub Release `fallback-<first 16 hex of the hash>` (prerelease) with assets
+   `openscad.fallback.js`, `.sha256` and `fallback.json`
+   (`{url, sha256, inputHash, openscadCommit, builtAt}`). A no-op if the release
+   exists; the build is ~25 min cold, a few minutes with warm caches. Run it by
+   hand with Actions > "Publish wasm2js fallback" (`force` rebuilds).
+3. **`sync-upstream.yml`**: job `plan` merges upstream and asks whether the merged
+   recipe has a release. If not, it pushes the candidate to the temporary branch
+   `sync-pending`, job `fallback` builds it, and job `sync` then runs as usual.
+   `sync-upstream.sh` runs `scripts/pin-fallback.sh`, which commits the release's
+   `fallback.json` as `scripts/fallback.json` into the candidate before the
+   checks, so staging (and, after promotion, production) is built with that pin.
+4. **`scripts/vercel-prebuild.sh`** downloads `url` (`curl -fL --retry 3`) to
+   `public/openscad.fallback.js` and verifies `sha256`; a missing pin, 404 or
+   mismatch fails the build. `OPENSCAD_FALLBACK=off` skips it,
+   `OPENSCAD_FALLBACK_FILE=/path` uses a local copy. webpack copies it to
+   `dist/` unminified and out of the service worker precache.
+5. **Smoke**: `smoke-deployment.mjs` requires `/openscad.fallback.js` to be a
+   200 JavaScript response over 10 MB whose sha256 equals the pin exposed in
+   `/version.json` (`fallback.sha256`). The sync's `fallback-fetch` check runs the
+   same prebuild step on the candidate.
+
+The first release can be created by the sync itself (it will wait ~25 min once)
+or from the latest CI artifact with `scripts/bootstrap-fallback-release.sh`.
+Old `fallback-*` releases can be deleted once no branch pins them.
+
 ## One-time owner steps
 
 1. **Merge the automation into `deploy/vercel`** (fast-forward from

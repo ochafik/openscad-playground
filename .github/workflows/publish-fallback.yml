@@ -1,0 +1,204 @@
+name: Publish wasm2js fallback
+
+# Builds the wasm2js fallback (public/openscad.fallback.js, see
+# docs/WASM_FALLBACK.md) for the recipe at `ref` and publishes it as the GitHub
+# Release `fallback-<input hash>` with the assets
+#   openscad.fallback.js, openscad.fallback.js.sha256, fallback.json
+# Releases are content-addressed (scripts/fallback-input-hash.sh), so this is a
+# no-op when the release already exists. Vercel builds download the file pinned
+# in scripts/fallback.json (scripts/vercel-prebuild.sh); the sync workflow pins
+# it (scripts/pin-fallback.sh). See docs/DEPLOYMENT_AUTOMATION.md.
+#
+# The build jobs mirror build-fallback.yml (same cache keys) on purpose: that
+# workflow is upstream's and builds the commit that triggered it, while this one
+# must build an arbitrary `ref` (the sync candidate).
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Branch or commit whose recipe to build (default the workflow's own commit)
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or commit whose recipe to build (default the selected branch)
+        type: string
+        default: ""
+      force:
+        description: Rebuild and replace the release even if it exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  REF: ${{ inputs.ref || github.sha }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      hash: ${{ steps.plan.outputs.hash }}
+      sha: ${{ steps.plan.outputs.sha }}
+      exists: ${{ steps.plan.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.REF }}
+      - id: plan
+        env:
+          FORCE: ${{ inputs.force && 'true' || 'false' }}
+        run: |
+          tag=$(bash scripts/fallback-input-hash.sh --tag)
+          {
+            echo "tag=$tag"
+            echo "hash=$(bash scripts/fallback-input-hash.sh)"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$FORCE" != true ] && gh release view "$tag" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $tag exists; nothing to build." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Release $tag is missing; building." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # Patched Binaryen wasm2js (cached across OpenSCAD-side changes).
+  binaryen:
+    name: Patched wasm2js
+    needs: plan
+    if: needs.plan.outputs.exists != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Compute cache key
+        id: key
+        run: |
+          # shellcheck disable=SC2016
+          ref=$(sed -n 's/^BINARYEN_REF="\${BINARYEN_REF:-\([0-9a-f]*\)}"/\1/p' scripts/build-wasm-fallback.sh)
+          [ -n "$ref" ] || { echo "could not extract BINARYEN_REF" >&2; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Restore wasm2js
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: out/wasm2js
+          key: wasm2js-v1-${{ steps.key.outputs.ref }}-${{ hashFiles('scripts/patches/**') }}
+      - name: Build patched wasm2js
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          ONLY: binaryen
+          WASM2JS_OUT: ${{ github.workspace }}/out/wasm2js
+        run: ./scripts/build-wasm-fallback.sh
+      - run: chmod +x out/wasm2js
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasm2js
+          path: out/wasm2js
+          retention-days: 1
+          if-no-files-found: error
+
+  openscad:
+    name: OpenSCAD wasm2js module
+    needs: [plan, binaryen]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v8
+        with:
+          name: wasm2js
+          path: out
+      - run: chmod +x out/wasm2js
+      - name: Restore built module
+        id: built
+        uses: actions/cache@v6
+        with:
+          path: public/openscad.fallback.js
+          key: fallback-js-v1-${{ hashFiles('scripts/build-wasm-fallback.sh', 'scripts/patches/**') }}
+      - name: Restore ccache
+        if: steps.built.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
+          path: .ccache
+          key: ccache-v1-${{ github.sha }}
+          restore-keys: ccache-v1-
+      - name: Build openscad.fallback.js
+        if: steps.built.outputs.cache-hit != 'true'
+        env:
+          PATCHED_WASM2JS: ${{ github.workspace }}/out/wasm2js
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          ( while sleep 60; do echo "[mem/disk] $(free -m | awk '/Mem/{print $3"/"$2" MB used"}'), $(df -h / | awk 'NR==2{print $4" free"}')"; done ) &
+          ./scripts/build-wasm-fallback.sh
+      - name: Sanity checks (size, syntax, nesting, headless render)
+        run: node scripts/check-wasm-fallback.mjs public/openscad.fallback.js
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openscad.fallback.js
+          path: public/openscad.fallback.js
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [plan, openscad]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Two runs for the same recipe must not race to create the same tag.
+    concurrency:
+      group: publish-${{ needs.plan.outputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: openscad.fallback.js
+          path: out
+      - name: Create release
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          HASH: ${{ needs.plan.outputs.hash }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          FORCE: ${{ inputs.force && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          cd out
+          if [ "$FORCE" != true ] && gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG appeared meanwhile; keeping it."; exit 0
+          fi
+          sha256=$(sha256sum openscad.fallback.js | cut -d' ' -f1)
+          echo "$sha256  openscad.fallback.js" > openscad.fallback.js.sha256
+          # shellcheck disable=SC2016
+          openscad_commit=$(sed -n 's/^OPENSCAD_REF="\${OPENSCAD_REF:-\([0-9a-f]*\)}"/\1/p' ../scripts/build-wasm-fallback.sh)
+          jq -n --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/openscad.fallback.js" \
+                --arg sha256 "$sha256" --arg inputHash "$HASH" --arg openscadCommit "$openscad_commit" \
+                --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{url:$url, sha256:$sha256, inputHash:$inputHash, openscadCommit:$openscadCommit, builtAt:$builtAt}' > fallback.json
+          cat fallback.json
+          if [ "$FORCE" = true ] && gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+          fi
+          # A prerelease so it never becomes the repo's "latest" release.
+          gh release create "$TAG" openscad.fallback.js openscad.fallback.js.sha256 fallback.json \
+            --target "$SHA" --prerelease --title "wasm2js fallback ${HASH:0:12}" \
+            --notes "Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID from recipe input hash \`$HASH\` (scripts/fallback-input-hash.sh). Consumed via scripts/fallback.json; safe to delete only when no deployed branch pins it."
