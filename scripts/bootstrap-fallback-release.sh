@@ -63,7 +63,7 @@ echo "${sha256}  openscad.fallback.js" > "${WORKDIR}/openscad.fallback.js.sha256
 # shellcheck disable=SC2016
 openscad_commit="$(sed -n 's/^OPENSCAD_REF="\${OPENSCAD_REF:-\([0-9a-f]*\)}"/\1/p' scripts/build-wasm-fallback.sh)"
 node -e '
-  const [url, sha256, inputHash, openscadCommit] = process.argv.slice(2);
+  const [url, sha256, inputHash, openscadCommit] = process.argv.slice(1);
   console.log(JSON.stringify({ url, sha256, inputHash, openscadCommit, builtAt: new Date().toISOString() }, null, 2));
 ' "https://github.com/${REPO}/releases/download/${tag}/openscad.fallback.js" "${sha256}" "${hash}" "${openscad_commit}" > "${WORKDIR}/fallback.json"
 echo "verified ${f} (sha256 ${sha256}); metadata in ${WORKDIR}/fallback.json"
