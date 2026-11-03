@@ -113,6 +113,24 @@ describe('e2e', () => {
     expectObjectList();
   }, longTimeout);
 
+  test('the completion sound ships in compact formats', async () => {
+    await page.goto(baseUrl);
+    const sources = await page.evaluate(() => [...document.querySelectorAll('#complete-sound source')].map(s => s.src));
+    expect(sources.map(s => s.split('/').pop())).toEqual(['complete.ogg', 'complete.m4a']);
+    for (const src of sources) {
+      const res = await page.evaluate(async (u) => {
+        const r = await fetch(u);
+        return {ok: r.ok, bytes: (await r.arrayBuffer()).byteLength};
+      }, src);
+      expect(res.ok).toBe(true); // 200, or 206 from servers that answer media requests with ranges
+      expect(res.bytes).toBeGreaterThan(1000);
+      expect(res.bytes).toBeLessThan(20 * 1024);
+    }
+    // The e2e browser (Chrome) must be able to decode the first source.
+    const canPlay = await page.evaluate(() => document.getElementById('complete-sound').canPlayType('audio/ogg; codecs="opus"'));
+    expect(canPlay).not.toBe('');
+  }, longTimeout);
+
   test('sources in subdirectories can be included', async () => {
     // Regression: the worker did not create parent directories, so /lib/foo.scad failed with an FS error.
     const state = {
@@ -252,15 +270,21 @@ describe('e2e', () => {
     page.on('request', onRequest);
     return { zips, stop: () => page.off('request', onRequest) };
   }
-  // Expands a node of the open file picker tree.
-  function expandTreeNode(label) {
-    return page.waitForFunction((label) => {
-      const li = [...document.querySelectorAll('li.p-treenode')]
-        .find(li => li.querySelector(':scope > .p-treenode-content .p-treenode-label')?.textContent === label);
-      if (!li) return false;
-      if (li.getAttribute('aria-expanded') !== 'true') li.querySelector(':scope > .p-treenode-content .p-tree-toggler')?.click();
-      return li.getAttribute('aria-expanded') === 'true';
-    }, {timeout: 30000}, label);
+  // Expands the given chain of nodes of the open file picker tree (each is a child of the previous one).
+  // The tree can re-render and collapse while libraries get mounted/indexed: re-expand from the top until the whole chain is open.
+  function expandTreePath(path) {
+    return page.waitForFunction((path) => {
+      for (const label of path) {
+        const li = [...document.querySelectorAll('li.p-treenode')]
+          .find(li => li.querySelector(':scope > .p-treenode-content .p-treenode-label')?.textContent === label);
+        if (!li) return false;
+        if (li.getAttribute('aria-expanded') !== 'true') {
+          li.querySelector(':scope > .p-treenode-content .p-tree-toggler')?.click();
+          return false;
+        }
+      }
+      return true;
+    }, {timeout: 30000, polling: 200}, path);
   }
   // Expands the given nodes of the open file picker tree, then clicks the last one.
   // (The tree may re-render and collapse while libraries get mounted/indexed: retry from the top.)
@@ -297,9 +321,8 @@ describe('e2e', () => {
       return names.every(n => labels.has(n));
     }, {timeout: 30000, polling: 200}, ['BOSL2', 'NopSCADlib', 'MCAD', 'openscad', ...lazyLibraries]);
     // Lazy libraries can be browsed...
-    await expandTreeNode('boltsparts');
-    await expandTreeNode('vacuum');
-    await page.waitForFunction(() => [...document.querySelectorAll('.p-treenode-label')].some(l => l.textContent === 'CF-Flange.scad'), {timeout: 30000});
+    await expandTreePath(['libraries', 'boltsparts', 'vacuum']);
+    await page.waitForFunction(() => [...document.querySelectorAll('.p-treenode-label')].some(l => l.textContent === 'CF-Flange.scad'), {timeout: 30000, polling: 200});
     // ...without having been fetched; the removed library is gone.
     await new Promise(r => setTimeout(r, 1500));
     requests.stop();
@@ -325,6 +348,30 @@ describe('e2e', () => {
     expectMountedArchives(['boltsparts']);
     // (Switching away from the unsaved default file logs 'Error while reading file', which is not about libraries.)
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].text.startsWith('Error while reading file')) messages.splice(i, 1);
+  }, longTimeout);
+
+  test('typing a long burst under CPU throttling keeps every keystroke', async () => {
+    // The controlled editor value used to lag behind typing: a stale render overwrote newer keystrokes
+    // ("boltsparts/" became "boltsarts/") and closed the completion widget, which made the completion tests
+    // flaky under CI load. (Throttling only makes the race likelier; the deterministic check is the
+    // EditorValueSync unit test.)
+    await loadSrc('// ');
+    await page.waitForSelector('.monaco-editor .view-lines');
+    await page.click('.monaco-editor .view-lines');
+    await page.keyboard.down('Control');
+    await page.keyboard.press('End');
+    await page.keyboard.up('Control');
+    const client = await page.createCDPSession();
+    await client.send('Emulation.setCPUThrottlingRate', {rate: 4});
+    const typed = '// ' + 'abcdefghijklmnopqrstuvwxyz0123456789 '.repeat(12) + 'boltsparts/vacuum';
+    try {
+      await page.keyboard.type(typed);
+      await new Promise(r => setTimeout(r, 4000)); // let the throttled renders drain
+    } finally {
+      await client.send('Emulation.setCPUThrottlingRate', {rate: 1});
+    }
+    expect(await page.evaluate(() => window.monaco.editor.getModels().map(m => m.getValue()).join('\n'))).toBe('// ' + typed);
+    messages.length = 0; // the intermediate sources are not valid scripts
   }, longTimeout);
 
   test('completes include/use library names and paths, lazy libraries included, without fetching them', async () => {
@@ -667,6 +714,20 @@ describe('embed render and download', () => {
     expect(buf.readUInt32LE(80)).toBe(12);
     expect(buf.length).toBe(84 + 12 * 50);
     await page.waitForFunction(() => /^Downloaded playground\.stl/.test(document.querySelector('[role=status][aria-live=polite]')?.textContent ?? ''));
+  }, longTimeout);
+});
+
+describe('render supersede', () => {
+  test('a full render started while the initial preview is still pending leaves nothing stuck busy', async () => {
+    // Regression: the full render cancelled the debounced preview, whose promise never settled, so `previewing`
+    // stayed true: the Render button spun forever and tools waiting for idle timed out.
+    await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent('cube([5, 5, 5]);')}`);
+    // The toolbar shows "Rendering…" (disabled) while the initial preview is pending; F6 is the full render.
+    await page.waitForSelector('[role=toolbar] button[aria-label="Rendering…"], [role=toolbar] button[aria-label="Render"]', { timeout: 45000 });
+    await page.keyboard.press('F6'); // within the preview debounce window: cancels the pending preview
+    await page.waitForSelector('[role=toolbar] button[aria-label="Render"]:not([disabled])', { timeout: 60000 });
+    await new Promise(r => setTimeout(r, 2500)); // longer than the preview debounce
+    expect(await page.$('[role=toolbar] button[aria-label="Render"]:not([disabled])')).not.toBeNull();
   }, longTimeout);
 });
 

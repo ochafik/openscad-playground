@@ -13,6 +13,8 @@ import { State, StatePersister } from '../state/app-state.ts';
 import { Model } from '../state/model.ts';
 import { ViewerPanelHandle } from './ViewerPanel.tsx';
 import { FULL_LAYOUT_HEIGHT, shouldReport, targetHeight } from '../state/mcp-sizing.ts';
+import LoadingOverlay from './LoadingOverlay.tsx';
+import { loadingView } from '../state/loading-state.ts';
 import { useEmbedClass } from './use-embed-class.ts';
 import EmbedView, { CornerButton, EmbedIcons } from './EmbedView.tsx';
 import { ModelContext, FSContext, McpContext } from './contexts.ts';
@@ -67,6 +69,9 @@ const lazyFullLayout = (fs: FS) => React.lazy(async () => {
   return layout;
 });
 
+/** How long tool calls wait for the create tool's result before assuming there is none. */
+const INITIAL_STATE_GRACE_MS = 4000;
+
 export function McpApp({
   initialState,
   statePersister,
@@ -89,6 +94,20 @@ export function McpApp({
   // always tracks the latest state (setState assigns it synchronously).
   const [model] = useState(() => new Model(fs, state, setState, statePersister));
   const modelRef = useRef(model);
+  // The app tools are registered with the host before React mounts, so a fast caller can invoke one before the
+  // create tool's result (the initial source) has been applied: it would then render an empty model. Tool calls
+  // therefore wait for the initial state, or for a short grace period when no create result ever arrives.
+  const [initialApplied, setInitialApplied] = useState(false);
+  // Loading feedback (see state/loading-state.ts). The host may already have delivered the input before we mounted.
+  const [mountedAt] = useState(() => Date.now());
+  const [inputAt, setInputAt] = useState<number | null>(() => toolEvents.inputs.length + toolEvents.results.length > 0 ? Date.now() : null);
+  const [cancelled, setCancelled] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const firstRenderDone = useRef(false);
+  useEffect(() => {
+    const t = setTimeout(() => setInitialApplied(true), INITIAL_STATE_GRACE_MS);
+    return () => clearTimeout(t);
+  }, []);
   const [panelHeight, setPanelHeight] = useState<number | null>(null);
   const [displayMode, setDisplayMode] = useState<string | undefined>(() => app.getHostContext()?.displayMode);
   useEmbedClass(state.view.embed);
@@ -143,6 +162,7 @@ export function McpApp({
 
   // Apply the create tool's input (early: streamed before the result).
   const applyToolInput = useCallback((params: ToolInputParams) => {
+    setInputAt(t => t ?? Date.now());
     const args = params.arguments ?? {};
     if (args.source && typeof args.source === 'string') {
       applySource(args.source);
@@ -158,6 +178,8 @@ export function McpApp({
   // defaults (e.g. the demo source and camera preset when the model passed
   // no arguments).
   const applyToolResult = useCallback((params: ToolResultParams) => {
+    setInputAt(t => t ?? Date.now());
+    setInitialApplied(true); // from now on tool calls see the created model (see the gate below)
     const sc = params.structuredContent as Record<string, unknown> | undefined;
     if (!sc || typeof sc !== 'object') return;
     if (typeof sc.source === 'string' && sc.source !== modelRef.current.source) {
@@ -184,10 +206,12 @@ export function McpApp({
     for (const params of toolEvents.results.splice(0)) applyToolResult(params);
     app.ontoolinput = applyToolInput;
     app.ontoolresult = applyToolResult;
+    app.ontoolcancelled = () => { setInitialApplied(true); setCancelled(true); };
   }, [app, toolEvents, applyToolInput, applyToolResult]);
 
   // Install the host that the view-registered app tools delegate to
   useEffect(() => {
+    if (!initialApplied) return;
     const snapshot = (timedOut?: boolean): ViewerSnapshot => buildSnapshot(modelRef.current, timedOut);
     const host: ViewerHost = {
       snapshot: () => snapshot(),
@@ -265,7 +289,7 @@ export function McpApp({
       setActiveHost(null);
       updateContextRef.current = null;
     };
-  }, [app]);
+  }, [app, initialApplied]);
 
   // Auto-update model context when source, vars, or rendering status change
   const sourceContent = state.params.sources.find(s => s.path === state.params.activePath)?.content;
@@ -397,10 +421,27 @@ export function McpApp({
   const hostModes = app.getHostContext()?.availableDisplayModes;
   const fullscreen = hostModes?.includes('fullscreen') ? { active: isFullscreen, toggle: toggleFullscreen } : undefined;
 
+  const busyNow = !!(state.rendering || state.previewing || state.checkingSyntax);
+  const firstError = state.error ?? state.lastCheckerRun?.markers.find(m => m.severity === 8)?.message;
+  if (state.output) firstRenderDone.current = true;
+  const loading = firstRenderDone.current
+    ? loadingView({ now, mountedAt, inputAt, cancelled: false, busy: false, hasOutput: true })
+    : loadingView({ now, mountedAt, inputAt, cancelled, error: firstError, busy: busyNow, hasOutput: !!state.output });
+  // Tick only while something could still change on a timer (the delay threshold, the no-input timeout).
+  const ticking = !firstRenderDone.current && !cancelled;
+  useEffect(() => {
+    if (!ticking) return;
+    const t = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(t);
+  }, [ticking]);
+  // The static boot bar of the HTML page hands over to the React one.
+  useEffect(() => { document.getElementById('boot-progress')?.remove(); }, []);
+
   return (
     <ModelContext.Provider value={model}>
       <FSContext.Provider value={fs}>
         <McpContext.Provider value={app}>
+          <LoadingOverlay view={loading} />
           {state.view.embed
             ? <EmbedView
                 viewerRef={viewerRef}

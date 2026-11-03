@@ -13,6 +13,7 @@
  */
 
 import assert from "node:assert/strict";
+import { NO_INPUT_TIMEOUT_MS, SHOW_DELAY_MS, loadingPhase, loadingView, type LoadingInputs } from "../src/state/loading-state.ts";
 import {
   createTools,
   type CameraState,
@@ -21,6 +22,8 @@ import {
   type ViewerHost,
   type ViewerSnapshot,
 } from "../src/state/mcp-tools.ts";
+import { EditorValueSync } from "../src/state/editor-value-sync.ts";
+import { AbortablePromise, SupersededError, turnIntoDelayableExecution } from "../src/utils.ts";
 import { FORMAT_INFO, LINK_CAP, SIZE_CAPS, buildFilename, bytesToBase64, dataUri, deliveryPlan, parseFormat, ExportError } from "../src/state/export-logic.ts";
 import { FULL_LAYOUT_HEIGHT, INLINE_HEIGHT, MAX_HEIGHT, heightCap, shouldReport, targetHeight } from "../src/state/mcp-sizing.ts";
 import { fullAppUrl, isFramed, resolveMcpSetupUrl, parseEmbedOverride, resolveEmbed, stripEmbedFromFragment } from "../src/state/embed.ts";
@@ -348,6 +351,87 @@ async function main() {
     assert.equal(shouldReport(null, 400), true);
     assert.equal(shouldReport(400, 403), false);
     assert.equal(shouldReport(400, 405), true);
+  });
+  await test("delayable jobs: a newer call supersedes older ones, and every call settles", async () => {
+    (globalThis as any).window ??= globalThis;
+    const events: string[] = [];
+    const delayable = turnIntoDelayableExecution(15, (id: string) =>
+      AbortablePromise<string>((resolve) => {
+        events.push(`start ${id}`);
+        const t = setTimeout(() => resolve(`done ${id}`), 40);
+        return () => { events.push(`kill ${id}`); clearTimeout(t); };
+      }));
+    const outcome = (p: Promise<string>) => p.then((v) => v, (e) => (e instanceof SupersededError ? "superseded" : `error ${e}`));
+    // 1. a debounced call replaced before its timer fires never runs and rejects instead of hanging
+    const a = outcome(delayable("a")({ now: false }));
+    const b = outcome(delayable("b")({ now: true }));
+    assert.deepEqual(await Promise.all([a, b]), ["superseded", "done b"]);
+    assert.deepEqual(events, ["start b"]);
+    // 2. a running job replaced by a newer call is killed and its call rejects
+    events.length = 0;
+    const c = outcome(delayable("c")({ now: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    const d = outcome(delayable("d")({ now: true }));
+    assert.deepEqual(await Promise.all([c, d]), ["superseded", "done d"]);
+    assert.deepEqual(events, ["start c", "kill c", "start d"]);
+    // 3. an older job that finishes does not clear the kill signal of a newer one
+    events.length = 0;
+    const e1 = outcome(delayable("e")({ now: true }));
+    assert.equal(await e1, "done e");
+    const f1 = outcome(delayable("f")({ now: true }));
+    const g1 = outcome(delayable("g")({ now: true }));
+    assert.deepEqual(await Promise.all([f1, g1]), ["superseded", "done g"]);
+    assert.ok(events.includes("kill f"));
+  });
+  await test("EditorValueSync: typing is never fed back, external changes still apply", () => {
+    const sync = new EditorValueSync("start");
+    // The user types a, b, c; renders (and the library's effects) lag behind the editor.
+    sync.emitted("starta");
+    sync.emitted("startab");
+    assert.equal(sync.valueProp("starta"), "start", "stale echo: the prop does not follow typing");
+    sync.emitted("startabc");
+    assert.equal(sync.valueProp("startab"), "start");
+    assert.equal(sync.valueProp("startabc"), "start", "caught up: still the same prop (the editor already has the text)");
+    // Echo of the same text again (re-render without change).
+    assert.equal(sync.valueProp("startabc"), "start");
+    // A restore to an older text whose echo was already seen is an external change (undo, tool edit).
+    assert.equal(sync.valueProp("starta"), "starta");
+    // File switch / tool edit with nothing typed.
+    assert.equal(sync.valueProp("cube(1);"), "cube(1);");
+    // After an external change typing resumes and is still not fed back.
+    sync.emitted("cube(1);x");
+    assert.equal(sync.valueProp("cube(1);x"), "cube(1);");
+    // Backspace to the prop text: still fine.
+    sync.emitted("cube(1);");
+    assert.equal(sync.valueProp("cube(1);"), "cube(1);");
+    // Unrelated external text while typing in flight is passed through.
+    sync.emitted("cube(1);y");
+    assert.equal(sync.valueProp("from a tool"), "from a tool");
+  });
+  await test("loading state machine: waiting -> loading -> rendering -> done, plus error/cancelled/timeout and the delay", () => {
+    const base: LoadingInputs = { now: 1000, mountedAt: 1000, inputAt: null, cancelled: false, busy: false, hasOutput: false };
+    const at = (ms: number, over: Partial<LoadingInputs> = {}) => ({ ...base, now: 1000 + ms, ...over });
+    // No flash for fast loads: nothing is shown before the delay.
+    assert.deepEqual(loadingView(at(0)), { phase: "waiting", showBar: false, message: null });
+    assert.equal(loadingView(at(SHOW_DELAY_MS - 1)).showBar, false);
+    assert.deepEqual(loadingView(at(SHOW_DELAY_MS)), { phase: "waiting", showBar: true, message: "Waiting for the assistant…" });
+    // Input received: loading the engine, then rendering, then done.
+    assert.equal(loadingView(at(500, { inputAt: 1300 })).message, "Loading OpenSCAD engine…");
+    assert.equal(loadingView(at(500, { inputAt: 1300, busy: true })).message, "Rendering…");
+    assert.deepEqual(loadingView(at(900, { inputAt: 1300, hasOutput: true })), { phase: "done", showBar: false, message: null });
+    // Input that was already there at mount (delivered before the view mounted) skips "waiting".
+    assert.equal(loadingPhase(at(10, { inputAt: 1000 })), "loading");
+    // Errors win over progress and hide the bar immediately (no delay), cancellation too.
+    const err = loadingView(at(10, { inputAt: 1000, busy: true, error: "syntax error" }));
+    assert.deepEqual([err.phase, err.showBar, err.message], ["error", false, "Could not render: syntax error"]);
+    assert.deepEqual(loadingView(at(10, { cancelled: true })), { phase: "cancelled", showBar: false, message: "The tool call was cancelled" });
+    // Never spins forever: after the timeout without input, say so.
+    assert.equal(loadingPhase(at(NO_INPUT_TIMEOUT_MS - 1)), "waiting");
+    const t = loadingView(at(NO_INPUT_TIMEOUT_MS));
+    assert.deepEqual([t.phase, t.showBar, t.message], ["timeout", false, "No input received"]);
+    assert.ok(t.hint && /call the tool again/.test(t.hint));
+    // Input arriving after the timeout recovers.
+    assert.equal(loadingPhase(at(NO_INPUT_TIMEOUT_MS + 5, { inputAt: 1000 + NO_INPUT_TIMEOUT_MS + 1 })), "loading");
   });
   await test("isFramed: top-level false, framed true, cross-origin access throwing means framed", () => {
     const w = {} as { self: unknown; top: unknown };
