@@ -9,111 +9,173 @@ deploy-specific commits (`vercel.json`, `.vercelignore`, `api/mcp.ts`,
 ## Architecture
 
 ```
-upstream/main --(every 6 h)--> sync-upstream.yml --(all checks green, push)--> deploy/vercel
-                                                                                   |
-                                      Vercel GitHub integration (production branch) v
-                                                                              Production deploy
-                                                                                   |
-                                   deployment_status: success --> smoke-deployment.yml
+upstream/main --(every 6 h)--> sync-upstream.yml
+                                  merge + build + tests + MCP smoke (local)
+                                          | green
+                                          v
+                                  branch `staging` ----(Vercel Git integration)----> Preview deployment
+                                                                                    https://staging.openscad.ochafik.com
+                                                                                           |
+                                          deployment_status: success (Preview)             v
+                                  smoke-deployment.yml: smoke staging + /version.json == tested sha
+                                          | green                         | red: issue "Staging smoke failed for <sha>", no promotion
+                                          v
+                                  promote: fast-forward deploy/vercel to the tested sha (ff-only)
+                                          |   (Vercel Production deploy)
+                                          v
+                                  wait for /version.json == sha on https://openscad.ochafik.com, smoke production
+                                          | red: issue "Production smoke failed for <sha>" + rollback instructions
 ```
 
+Emergency bypass: `fast-track.yml` (below).
+
 1. **`.github/workflows/sync-upstream.yml`** (runs `scripts/sync-upstream.sh`)
-   - fetches `upstream/main`; exits if the deploy branch already contains it
-     (optionally only considering commits older than `min_age_hours`);
-   - merges it (`git merge`, never rebase, never force-push) into a temporary
-     `sync/candidate` branch cut from `deploy/vercel`;
+   - fetches `upstream/main`; exits if `deploy/vercel` already contains it, or
+     if `staging` already contains it (awaiting promotion; `force` input
+     overrides). Optionally only considers commits older than `min_age_hours`;
+   - merges it (`git merge`, never rebase) into a temporary `sync/candidate`
+     branch cut from `deploy/vercel`;
    - checks: `npm ci`, `cd server && npm ci`, `npm run build:all` (with
      `OPENSCAD_MCP_URL=/mcp` as on Vercel), `npx tsc --noEmit`,
      `scripts/build-mcp-function.sh`, size limits (function bundle < 20 MB,
      `dist/` < 120 MB, no file > 50 MB; Vercel's hard limit for a function is
-     250 MB unzipped, these catch runaway growth early), server tests, an MCP
-     smoke test against a locally started server
-     (`scripts/smoke-deployment.mjs`), and the production-mode e2e suite;
-   - all green: fast-forward push of the merge commit to `deploy/vercel`;
-   - conflict or failed check: nothing is pushed to `deploy/vercel`. The
-     candidate is pushed to `sync-failed/<UTC date-time>` (when possible) and an
-     issue is opened (or commented on): `Upstream sync conflict` /
-     `Upstream sync failed`, with the failing step, log tail and run link. The
-     run is also marked failed. The issue is closed automatically by the next
-     successful sync.
-   - inputs: `dry_run` (everything except pushes, branches and issues),
-     `min_age_hours` (cooling-off; scheduled runs use the repository variable
-     `SYNC_MIN_AGE_HOURS`, default 0).
+     250 MB unzipped, these catch runaway growth early), server tests, the
+     build-version file, an MCP smoke test against a locally started server,
+     and the production-mode e2e suite;
+   - all green: pushes the candidate to **`staging`** (disposable branch, may
+     be replaced with `--force-with-lease`). `deploy/vercel` is never touched
+     here;
+   - conflict or failed check: nothing is pushed to `staging` or
+     `deploy/vercel`. The candidate goes to `sync-failed/<UTC date-time>` (when
+     possible) and an issue is opened or commented on (`Upstream sync conflict`
+     / `Upstream sync failed`) with the failing step, log tail and run link.
+     The run is marked failed. The next successful sync closes the issue.
+   - inputs: `dry_run`, `force`, `min_age_hours` (cooling-off; scheduled runs
+     use the repository variable `SYNC_MIN_AGE_HOURS`, default 0).
 2. **`.github/workflows/smoke-deployment.yml`** (runs `scripts/smoke-deployment.mjs`)
-   triggers on `deployment_status` with state `success` and an environment
-   starting with `Production` (Vercel reports `Production`, or
-   `Production – <project>` when a repo has several projects), or manually with
-   a `url`. It always tests the production alias (the per-deployment URL may
-   be behind deployment protection), retrying 3 times for alias lag. On
-   failure it opens `Smoke test failed for <sha>`.
-3. **`scripts/smoke-deployment.mjs [url] [--origin O] [--host-header H] [--skip-static]`**
+   - job `staging`: on `deployment_status` success for an environment starting
+     with `Preview`. It only acts if `deployment.sha` is the current head of
+     `staging` (other previews are ignored). Smokes
+     `https://staging.openscad.ochafik.com` (repo variable `STAGING_URL`
+     overrides) and asserts that `/version.json` reports the tested sha, and
+     that the MCP CSP and `openscad-base-url` equal the staging origin.
+   - job `promote` (needs `staging`, `contents: write`): refuses if staging
+     moved or the sha is not a fast-forward of `deploy/vercel`, then
+     `git push origin <sha>:deploy/vercel` (no force), waits (up to 20 min) for
+     production to serve that sha, and smokes production.
+   - job `production`: on a `Production` `deployment_status` (e.g. a manual
+     push or a fast-track), a plain smoke with retries.
+   - `workflow_dispatch`: inputs `url`, `sha`, `promote`, `dry_run` (default
+     true). Smoke any URL; with `promote=true` also promote `sha` after a
+     green smoke (this is "promote manually"). `dry_run=true` checks
+     everything but pushes nothing.
+   - Vercel's exact payload naming (`deployment.environment` is `Preview` /
+     `Production`, `deployment.sha`, `deployment.ref`) was not verifiable
+     before the integration exists; the staging job deliberately matches on
+     sha, not on `ref`, to be robust. Check the first real run's event.
+3. **`.github/workflows/fast-track.yml`**: emergency bypass, see below.
+4. **`scripts/smoke-deployment.mjs [url] [--origin O] [--host-header H] [--expect-sha S] [--wait-s N] [--skip-static]`**
    checks `/`, `/index.js`, `/openscad.wasm`, `/libraries/index.json`,
    framability (no `X-Frame-Options`/`frame-ancestors`), the `/mcp` help page,
-   CORS preflight, `initialize`, `tools/list` (`create`) and
+   CORS preflight, `initialize`, `tools/list` (`create`),
    `resources/read ui://openscad/viewer.html` (CSP domains and
-   `openscad-base-url` equal the requested origin). Prints a PASS/FAIL table,
-   exits 1 on any failure. `--origin` sets the expected origin when it differs
-   from the URL; `--host-header` sends a custom `Host`.
-4. **`scripts/upsert-issue.sh`**: open-or-comment / close issues via `gh`.
+   `openscad-base-url` equal the requested origin) and, with `--expect-sha`,
+   that `/version.json` reports that commit (`--wait-s` polls for it first).
+   Prints a PASS/FAIL table, exits 1 on any failure.
+5. **`scripts/write-version.mjs`** writes `dist/version.json`
+   (`{sha, ref, builtAt}`, from `VERCEL_GIT_COMMIT_SHA`); `vercel.json` runs it
+   after `build:all`. Note: `vercel deploy` from a local directory has no git
+   sha, so such deployments report the local HEAD or `unknown`.
+6. **`scripts/upsert-issue.sh`**: open-or-comment / close issues via `gh`.
 
 ## One-time owner steps
 
 1. **Merge the automation into `deploy/vercel`** (fast-forward from
-   `deploy/automation`), **without** the temporary `ci-test/*` push trigger
-   (already removed in the final commit).
-2. **Settings > General > Default branch**: change to `deploy/vercel`.
-   Scheduled workflows and `deployment_status` workflows only run from the
-   default branch.
+   `deploy/automation`).
+2. **Settings > General > Default branch**: `deploy/vercel`. Scheduled and
+   `deployment_status` workflows only run from the default branch.
 3. **Settings > General > Features**: enable **Issues** (disabled on the fork
-   today; without it failures are only visible as red runs).
-4. **Settings > Actions > General**: allow Actions; under Workflow permissions
-   choose "Read and write permissions" (the workflows also declare their own
-   minimal `permissions:`). Confirm scheduled workflows are enabled (GitHub
-   disables them after 60 days without repository activity; the sync pushes
-   keep it alive, or re-enable them from the Actions tab).
+   today; otherwise failures are only visible as red runs).
+4. **Settings > Actions > General**: allow Actions; Workflow permissions:
+   "Read and write". Scheduled workflows are disabled after 60 days without
+   repository activity; re-enable from the Actions tab if that happens.
 5. **Vercel dashboard > project `openscad-playground` > Settings > Git**:
-   connect the GitHub repository `ochafik/openscad-playground` (install the
-   Vercel GitHub app on the fork), set **Production Branch** to `deploy/vercel`.
-   Other branches then produce Preview deployments (consider disabling
-   previews for `sync-failed/*` and `sync/*`, via Ignored Build Step or
-   Settings > Git).
-6. Optional: set repository variable `SYNC_MIN_AGE_HOURS` (e.g. `24`) for a
-   cooling-off period.
-7. Optional: secret `SYNC_PUSH_TOKEN` (fine-grained PAT, contents + workflows
-   write) so merges that change `.github/workflows/*` can be pushed. Without
-   it those merges are reported as `Upstream sync needs a manual merge`,
-   because `GITHUB_TOKEN` is not allowed to modify workflow files.
+   connect `ochafik/openscad-playground` (install the Vercel GitHub app on the
+   fork); **Production Branch** = `deploy/vercel`. Branches other than that
+   deploy as Previews; `staging` is one of them. The same `vercel.json` build
+   command applies to previews, so `OPENSCAD_MCP_URL=/mcp` is set there too.
+   Consider an Ignored Build Step so `sync/*`, `sync-failed/*` and
+   `ci-test/*` branches do not build.
+6. **Staging domain**: Settings > Domains > add `staging.openscad.ochafik.com`
+   and assign it to Git branch `staging` (custom domains are not covered by
+   Deployment Protection, so it is public, which the smoke test needs). At the
+   DNS provider (Namecheap): CNAME `staging.openscad` to the target Vercel
+   shows for the domain (typically `cname.vercel-dns.com`). The app derives its
+   base URL from the request host, so no further configuration is needed.
+7. Optional: repository variable `SYNC_MIN_AGE_HOURS` (e.g. `24`) for a
+   cooling-off period; `STAGING_URL` / `PRODUCTION_URL` to point the smoke
+   tests elsewhere.
+8. Optional: secret `SYNC_PUSH_TOKEN` (fine-grained PAT with contents and
+   workflows write) so merges that change `.github/workflows/*` can be pushed.
+   Without it those merges are reported as `Upstream sync needs a manual
+   merge`, because `GITHUB_TOKEN` cannot modify workflow files.
+9. Optional hardening for the emergency path: create a GitHub Environment
+   (e.g. `production`) with required reviewers and add `environment: production`
+   to the `ship` job of `fast-track.yml`.
 
 No secret is required, and none is committed.
+
+## Emergency procedure (fast-track)
+
+Actions > "Fast-track to production" > Run workflow:
+- `ref`: sha or branch to ship (default `staging`); it must fast-forward
+  `deploy/vercel` (the workflow refuses otherwise; no force push);
+- `reason`: required; recorded in the run summary along with the actor;
+- `skip_checks` (default true): when false, a quick gate (`npm ci`, server
+  tests, `tsc`, function bundle) runs first.
+
+It pushes straight to `deploy/vercel` (production deploys), waits for
+`/version.json` to report that sha and smokes production, opening an issue
+with rollback instructions if that fails. Guardrails: only users with write
+access to the repository can dispatch workflows; there is no CODEOWNERS
+involvement; the run and its reason are in the Actions log; see step 9 above
+to add a required-reviewer gate. To fix a broken commit, push the fix to a
+branch, then fast-track its sha.
 
 ## When something goes wrong
 
 - **Conflict**: the issue lists the files. Locally:
   `git fetch upstream origin && git checkout deploy/vercel && git merge upstream/main`,
-  resolve, run the checks (or run `DRY_RUN=true bash scripts/sync-upstream.sh`),
-  push. Until then every 6 h run retries and updates the same issue.
-- **Failed check**: inspect the issue/run (logs are also uploaded as the
-  `sync-logs` artifact) and the `sync-failed/...` branch.
-  Delete old `sync-failed/*` branches when done.
-- **Bad deploy**: Vercel dashboard > Deployments > previous production
-  deployment > **Instant Rollback**; then `git revert -m 1 <merge>` on
-  `deploy/vercel` (a rollback pins production until you promote again).
-- **Pause**: Actions > "Sync upstream" > "..." > Disable workflow (or set
-  repository variable `SYNC_MIN_AGE_HOURS` very large).
+  resolve, push the result to `staging` (it will be smoked and promoted like a
+  sync candidate) or fast-track it.
+- **Failed check / failed staging smoke**: inspect the issue/run (sync logs
+  are uploaded as the `sync-logs` artifact) and the `sync-failed/...` branch.
+  A failed staging smoke leaves production untouched; fix forward or re-run
+  with `force`. Delete old `sync-failed/*` branches when done.
+- **Bad production deploy**: Vercel dashboard > Deployments > previous
+  production deployment > **Instant Rollback**; then `git revert -m 1 <merge>`
+  on `deploy/vercel` (a rollback pins production until you promote again).
+- **Pause**: disable "Sync upstream" (stops new candidates); disable "Smoke
+  test and promote" (staging deploys but nothing is promoted: promotion then
+  only happens by hand via `workflow_dispatch` with `promote`, or fast-track);
+  or set `SYNC_MIN_AGE_HOURS` very large.
+- **Promote manually**: Actions > "Smoke test and promote" > Run workflow with
+  `sha`, `promote=true`, `dry_run=false`.
 - **Manual deploy fallback**: from a checkout of `deploy/vercel`,
   `vercel deploy --prod`.
 
 ## Security notes
 
 - Anything merged upstream goes live on the production domain after only the
-  automated checks. Use the cooling-off period to give maintainers time to
+  automated checks (including a smoke test of the real staging deployment). Use the cooling-off period to give maintainers time to
   notice and revert bad or malicious upstream commits, and consider reviewing
   the `Merge upstream` commits periodically.
 - Third-party actions are pinned by commit SHA; update them deliberately.
-- Workflows use minimal permissions (`contents: write` and `issues: write`
-  for sync, `contents: read` and `issues: write` for smoke) and no secrets.
+- Workflows use minimal permissions (`contents: write` + `issues: write` for
+  sync, promote and fast-track; `contents: read` + `issues: write` otherwise) and no secrets.
 - Pushes made with `GITHUB_TOKEN` do not trigger other workflows (that is why
-  all tests run inside the sync workflow); Vercel's integration is
+  all tests run inside the sync workflow and the smoke/promote chain is driven
+  by Vercel's `deployment_status` events, not by the push); Vercel's integration is
   independent and does deploy them.
 - Local testing: `DRY_RUN=true BASE_REF=<ref> bash scripts/sync-upstream.sh`
   from a scratch worktree (it switches branches); `SKIP_CHECKS=e2e,...` skips
