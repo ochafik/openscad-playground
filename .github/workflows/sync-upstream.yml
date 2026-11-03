@@ -20,9 +20,6 @@ on:
         description: Only merge upstream commits at least this many hours old (cooling-off)
         type: string
         default: "0"
-  # TEMPORARY (removed before merge): push-triggered dry run to test the YAML.
-  push:
-    branches: ["ci-test/*"]
 
 permissions:
   contents: write
@@ -38,9 +35,7 @@ jobs:
     timeout-minutes: 90
     env:
       TARGET_BRANCH: deploy/vercel
-      # Test pushes are always dry runs, merging into the pushed commit itself.
-      DRY_RUN: ${{ (github.event_name == 'push' || inputs.dry_run) && 'true' || 'false' }}
-      BASE_REF: ${{ github.event_name == 'push' && 'HEAD' || '' }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
       MIN_AGE_HOURS: ${{ inputs.min_age_hours || vars.SYNC_MIN_AGE_HOURS || '0' }}
       # Optional PAT with the `workflow` scope; without it, merges touching
       # .github/workflows are reported instead of pushed.
