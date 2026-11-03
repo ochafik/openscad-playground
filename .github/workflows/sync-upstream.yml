@@ -99,6 +99,10 @@ jobs:
               done ;;
           esac
 
+      - name: Prune old sync-failed branches (keep 5)
+        if: always() && env.DRY_RUN != 'true'
+        run: bash scripts/prune-sync-failed.sh
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

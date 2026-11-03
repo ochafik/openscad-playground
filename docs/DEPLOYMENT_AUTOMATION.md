@@ -45,6 +45,10 @@ Emergency bypass: `fast-track.yml` (below).
    - all green: pushes the candidate to **`staging`** (disposable branch, may
      be replaced with `--force-with-lease`). `deploy/vercel` is never touched
      here;
+   - the `staging` branch does not need to exist beforehand; the first green
+     candidate creates it. A merge that touches `.github/workflows/*` cannot be
+     pushed with the default token (to `staging` either); it is reported as
+     `Upstream sync needs a manual merge` unless `SYNC_PUSH_TOKEN` is set;
    - conflict or failed check: nothing is pushed to `staging` or
      `deploy/vercel`. The candidate goes to `sync-failed/<UTC date-time>` (when
      possible) and an issue is opened or commented on (`Upstream sync conflict`
@@ -54,7 +58,7 @@ Emergency bypass: `fast-track.yml` (below).
      use the repository variable `SYNC_MIN_AGE_HOURS`, default 0).
 2. **`.github/workflows/smoke-deployment.yml`** (runs `scripts/smoke-deployment.mjs`)
    - job `staging`: on `deployment_status` success for an environment starting
-     with `Preview`. It only acts if `deployment.sha` is the current head of
+     with `Preview`, or whose `deployment.ref` is `staging`. It only acts if `deployment.sha` is the current head of
      `staging` (other previews are ignored). Smokes
      `https://staging.openscad.ochafik.com` (repo variable `STAGING_URL`
      overrides) and asserts that `/version.json` reports the tested sha, and
@@ -151,7 +155,8 @@ branch, then fast-track its sha.
 - **Failed check / failed staging smoke**: inspect the issue/run (sync logs
   are uploaded as the `sync-logs` artifact) and the `sync-failed/...` branch.
   A failed staging smoke leaves production untouched; fix forward or re-run
-  with `force`. Delete old `sync-failed/*` branches when done.
+  with `force`. Old `sync-failed/*` branches are pruned automatically (newest 5 kept,
+  `scripts/prune-sync-failed.sh`).
 - **Bad production deploy**: Vercel dashboard > Deployments > previous
   production deployment > **Instant Rollback**; then `git revert -m 1 <merge>`
   on `deploy/vercel` (a rollback pins production until you promote again).

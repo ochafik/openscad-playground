@@ -45,12 +45,14 @@ env:
 jobs:
   staging:
     # Vercel names the environment "Preview" ("Preview – <project>" with several
-    # projects). Whether the deployment is *the* staging head is checked below
-    # by sha, so other previews (PR branches, sync-failed/*) are ignored.
+    # projects); also accept a deployment whose ref is the branch name. Whether
+    # the deployment is *the* staging head is then checked by sha below, so
+    # other previews (PR branches, sync-failed/*) are ignored.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.deployment_status.state == 'success' &&
-       startsWith(github.event.deployment_status.environment, 'Preview'))
+       (startsWith(github.event.deployment_status.environment, 'Preview') ||
+        github.event.deployment.ref == 'staging'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
@@ -198,7 +200,8 @@ jobs:
     if: >-
       github.event_name == 'deployment_status' &&
       github.event.deployment_status.state == 'success' &&
-      startsWith(github.event.deployment_status.environment, 'Production')
+      startsWith(github.event.deployment_status.environment, 'Production') &&
+      github.event.deployment.ref != 'staging'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
