@@ -224,18 +224,61 @@ describe('animation', () => {
     messages.length = 0; // a missing fallback build is reported as a banner/console error, not what is tested
   }, longTimeout);
 
-  test('embed: the toolbar carries Play next to Render, the slider sits along the bottom', async () => {
-    await load(SPIN, { animation: { steps: 4, fps: 20 }, query: '?embed=1' });
-    await page.waitForSelector(`[role=toolbar] ${PLAY}`, { timeout: 60000 });
+  const rect = (sel) => page.$eval(sel, e => { const r = e.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, w: r.width, h: r.height }; });
+  const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+  test('embed: Play sits at the left of the toolbar with the slider directly under it; the other buttons stay on the right', async () => {
+    await page.setViewport({ width: 400, height: 400 });
+    await load('size = 10; // [1:20]\n' + SPIN, { animation: { steps: 4, fps: 20 }, query: '?embed=1' });
+    await page.waitForSelector(`[role=group][aria-label="Animation controls"] ${PLAY}`, { timeout: 60000 });
     const labels = await page.$$eval('[role=toolbar][aria-label="Viewer actions"] [aria-label]', els => els.map(e => e.getAttribute('aria-label')));
-    expect(labels).toContain('Play animation');
+    expect(labels).not.toContain('Play animation'); // (not in the right-hand toolbar any more)
     expect(labels).not.toContain('Render');
-    const box = await page.$eval(SLIDER, e => { const r = e.getBoundingClientRect(); return { bottom: r.bottom, h: innerHeight, w: r.width }; });
-    expect(box.bottom).toBeGreaterThan(box.h - 60);
-    expect(box.w).toBeGreaterThan(60);
+    const check = async () => {
+      const play = await rect(PLAY), slider = await rect(SLIDER), bar = await rect('.animation-bar');
+      const right = await rect('[role=toolbar][aria-label="Viewer actions"]'), viewer = await rect('model-viewer.main-viewer');
+      // Play: top-left corner of the viewer.
+      expect(play.left - viewer.left).toBeLessThan(16);
+      expect(play.top - viewer.top).toBeLessThan(16);
+      // The slider directly under it, anchored left (not along the bottom).
+      expect(slider.top).toBeGreaterThanOrEqual(play.bottom);
+      expect(slider.top - play.bottom).toBeLessThan(24);
+      expect(bar.left).toBeLessThan(play.left + 4);
+      expect(slider.left - viewer.left).toBeLessThan(40);
+      expect(slider.w).toBeGreaterThan(60);
+      expect(bar.bottom - viewer.top).toBeLessThan(100);
+      // The right-hand buttons do not collide with the controls.
+      expect(overlaps(play, right)).toBe(false);
+      expect(overlaps(bar, right)).toBe(false);
+      expect(bar.right).toBeLessThanOrEqual(viewer.right - 8 + 0.5);
+      // Clear of the loading bar (4px at the very top).
+      expect(play.top).toBeGreaterThan(4);
+      return { play, bar, right };
+    };
+    await check();
+    // Customizer open: the sheet does not cover the controls (it starts below them on narrow frames).
+    await page.waitForSelector('button[aria-label="Customize"]', { timeout: 60000 });
+    await page.click('button[aria-label="Customize"]');
+    await page.waitForSelector('[role=complementary][aria-label=Customizer]');
+    await new Promise(r => setTimeout(r, 500));
+    const narrow = await check();
+    const panel = await rect('[role=complementary][aria-label=Customizer]');
+    expect(overlaps(narrow.play, panel)).toBe(false);
+    expect(overlaps(narrow.bar, panel)).toBe(false);
+    await page.setViewport({ width: 1000, height: 600 });
+    await new Promise(r => setTimeout(r, 500));
+    const wide = await check();
+    expect(overlaps(wide.bar, await rect('[role=complementary][aria-label=Customizer]'))).toBe(false);
+    // The settings popover opens downwards (the controls are at the top) and stays inside the frame.
+    await page.click('button[aria-label="Animation settings"]');
+    const pop = await rect('[role=dialog][aria-label="Animation settings"]');
+    expect(pop.top).toBeGreaterThanOrEqual(wide.bar.bottom);
+    expect(pop.top).toBeGreaterThan(0);
+    await page.click('button[aria-label="Animation settings"]');
+    await page.setViewport({ width: 800, height: 600 });
     await page.waitForFunction(() => document.querySelector('model-viewer.main-viewer').src.startsWith('data:'), { timeout: 60000 });
-    await page.click(`[role=toolbar] ${PLAY}`);
-    await page.waitForSelector(`[role=toolbar] ${PAUSE}`);
+    await page.click(PLAY);
+    await page.waitForSelector(PAUSE);
     await page.waitForFunction(() => document.querySelector('[data-testid=animation-time]').textContent === '$t=0.50', { timeout: 90000 });
     // Embed without $t: no animation controls.
     await load('cube(3);', { query: '?embed=1' });
@@ -248,9 +291,9 @@ describe('animation', () => {
     await page.goto(`${baseUrl}manifest.json`);
     await page.evaluate((u) => { document.body.innerHTML = `<iframe style="width:900px;height:500px" src="${u}"></iframe>`; }, url);
     const frame = await (await page.waitForSelector('iframe')).contentFrame();
-    await frame.waitForSelector(`[role=toolbar] ${PLAY}`, { timeout: 60000 });
-    await frame.click(`[role=toolbar] ${PLAY}`);
-    await frame.waitForSelector(`[role=toolbar] ${PAUSE}`);
+    await frame.waitForSelector(PLAY, { timeout: 60000 });
+    await frame.click(PLAY);
+    await frame.waitForSelector(PAUSE);
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].location?.url?.endsWith('/favicon.ico')) messages.splice(i, 1);
   }, longTimeout);
 });

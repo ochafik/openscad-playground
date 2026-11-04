@@ -47,7 +47,7 @@ function NumberField({ label, value, min, max, onCommit, width }: { label: strin
 }
 
 /** The time slider, the current `$t` and the loop settings. `dark`: light-on-dark styling (over the 3D view). */
-export function AnimationBar({ dark, style }: { dark?: boolean; style?: CSSProperties }) {
+export function AnimationBar({ dark, style, popover = 'up' }: { dark?: boolean; style?: CSSProperties; /** Which way the settings popover opens. */ popover?: 'up' | 'down' }) {
   const { model, animation, settings } = useAnimationState();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -82,7 +82,7 @@ export function AnimationBar({ dark, style }: { dark?: boolean; style?: CSSPrope
       </button>
       {open && (
         <div role="dialog" aria-label="Animation settings" style={{
-          position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, zIndex: 90, width: 190, padding: 10, borderRadius: 8,
+          position: 'absolute', ...(popover === 'up' ? { bottom: 'calc(100% + 6px)' } : { top: 'calc(100% + 6px)' }), right: 0, zIndex: 90, width: 190, padding: 10, borderRadius: 8,
           display: 'flex', flexDirection: 'column', gap: 6,
           background: dark ? 'rgba(30,30,30,0.95)' : 'var(--surface-overlay, #fff)', color: dark ? '#eee' : 'inherit',
           boxShadow: '0 4px 20px rgba(0,0,0,0.3)',

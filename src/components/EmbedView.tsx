@@ -64,6 +64,12 @@ export interface ExitAction {
 
 /** Distance of the customizer side sheet from the top of the frame (below the toolbar). */
 const PANEL_TOP = 52;
+/** Animation controls (top-left): the bar's width and height, under the 36px Play button. */
+const ANIM_WIDTH = 280;
+const ANIM_BAR_HEIGHT = 32;
+const ANIM_BOTTOM = 8 + 36 + 4 + ANIM_BAR_HEIGHT;
+/** Below this frame width the customizer sheet reaches under the animation bar, so it starts below it. */
+const ANIM_OVERLAP_QUERY = `(max-width: ${ANIM_WIDTH + 8 + 360 + 8}px)`;
 
 export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, onCameraChange, fullscreen, toolbar, exit, onDownload, onDownloadSource, onPanelContentHeight }: EmbedViewProps) {
   const model = useContext(ModelContext);
@@ -73,6 +79,14 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
   const params = state.parameterSet?.parameters ?? [];
   const hasParams = params.length > 0;
   const showCustomizer = !!state.view.customizerOverlay && hasParams;
+  const [animOverlap, setAnimOverlap] = useState(() => window.matchMedia(ANIM_OVERLAP_QUERY).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(ANIM_OVERLAP_QUERY);
+    const on = () => setAnimOverlap(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  const panelTop = state.animation && animOverlap ? ANIM_BOTTOM + 6 : PANEL_TOP;
   const setShowCustomizer = useCallback((open: boolean) => {
     model.mutate(s => s.view.customizerOverlay = open);
   }, [model]);
@@ -176,12 +190,12 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
     const scroller = panelScrollRef.current;
     const content = scroller?.firstElementChild as HTMLElement | null | undefined;
     if (!scroller || !content) return;
-    const report = () => onPanelContentHeight(PANEL_TOP + (panelHeaderRef.current?.offsetHeight ?? 0) + content.offsetHeight + 2);
+    const report = () => onPanelContentHeight(panelTop + (panelHeaderRef.current?.offsetHeight ?? 0) + content.offsetHeight + 2);
     report();
     const ro = new ResizeObserver(report);
     ro.observe(content);
     return () => { ro.disconnect(); onPanelContentHeight(null); };
-  }, [showCustomizer, onPanelContentHeight, state.parameterSet]);
+  }, [showCustomizer, onPanelContentHeight, state.parameterSet, panelTop]);
 
   const busy = state.rendering || state.previewing || state.checkingSyntax;
   const isFullscreen = !!fullscreen?.active;
@@ -273,7 +287,7 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
           className={`embed-panel ${isDark ? 'mcp-dark embed-dark' : ''}`}
           style={{
             position: 'absolute',
-            top: PANEL_TOP,
+            top: panelTop,
             right: 0,
             bottom: 0,
             width: 'min(360px, 85vw)',
@@ -324,7 +338,7 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
             {showHint && (
               <div className="embed-hint" style={{
                 position: 'absolute',
-                top: '8px',
+                top: state.animation ? ANIM_BOTTOM + 6 : '8px',
                 left: '8px',
                 zIndex: 60,
                 fontSize: '11px',
@@ -350,14 +364,21 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
               </div>
             )}
 
-      {/* Animation time slider (models that read $t), bottom, clear of the axes gizmo */}
+      {/* Animation (models that read $t), top-left: Play / Pause, with the time slider directly under it */}
       {state.animation && (
-        <div className="mcp-toolbar" style={{
-          position: 'absolute', left: 116, right: 8, bottom: 8, zIndex: 60, display: 'flex', justifyContent: 'flex-start',
-          pointerEvents: 'none',
+        <div className="mcp-toolbar" role="group" aria-label="Animation controls" style={{
+          position: 'absolute', top: 8, left: 8, zIndex: 60, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4,
+          width: ANIM_WIDTH, maxWidth: 'calc(100% - 16px)',
+          opacity: 0.55, transition: 'opacity 0.2s ease',
         }}>
-          <AnimationBar dark style={{
-            pointerEvents: 'auto', flex: 1, maxWidth: 480, padding: '4px 10px', borderRadius: 8, color: '#fff',
+          <CornerButton
+            icon={state.animation.playing ? AnimationIcons.pause : AnimationIcons.play}
+            label={playLabel(state.animation.playing)}
+            active={state.animation.playing}
+            onClick={() => model.animation.toggle()}
+          />
+          <AnimationBar dark popover="down" style={{
+            alignSelf: 'stretch', height: ANIM_BAR_HEIGHT, boxSizing: 'border-box', padding: '0 10px', borderRadius: 8, color: '#fff',
             backgroundColor: 'rgba(0,0,0,0.5)',
           }} />
         </div>
@@ -385,14 +406,6 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
             ariaControls={showCustomizer ? panelId : undefined}
             buttonRef={buttonRef}
             onClick={() => setShowCustomizer(!showCustomizer)}
-          />
-        )}
-        {state.animation && (
-          <CornerButton
-            icon={state.animation.playing ? AnimationIcons.pause : AnimationIcons.play}
-            label={playLabel(state.animation.playing)}
-            active={state.animation.playing}
-            onClick={() => model.animation.toggle()}
           />
         )}
         {onDownload && (
