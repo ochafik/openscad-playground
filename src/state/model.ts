@@ -8,6 +8,7 @@ import { AbortablePromise, downloadUrl, fetchSource, formatBytes, formatMillis, 
 import { AnimationController, AnimationFrame, AnimationInfo, AnimationRequest, AnimationSettings, animationPoolSize, clampSettings, DEFAULT_SETTINGS, DEFAULT_SETTINGS_SLOW, FRAME_CACHE_MAX_ENTRIES, frameAt } from "./animation.ts";
 import { projectUsesAnimationTime } from "./animation-detect.ts";
 import { projectKey } from "./animation-cache.ts";
+import { Bounds, boundsOfVertices, unionBounds } from "./animation-bounds.ts";
 import { detectWasmSupport, getForcedEngine } from "../runner/wasm-support.ts";
 
 import JSZip from 'jszip';
@@ -27,6 +28,7 @@ const githubRx = /^https:\/\/github.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/;
 interface RenderedFrame extends AnimationFrame {
   output: FileOutput;
   is2D: boolean;
+  bounds?: Bounds;
 }
 
 /** Frames rendered at the same time (`?animationWorkers=N` overrides, for testing and profiling). */
@@ -62,14 +64,15 @@ export class Model {
       settings: () => this.animationSettings,
       renderFrame: (t, slot) => this.renderFrameJob(t, slot),
       concurrency: () => animationConcurrency(),
+      keyframes: () => isSlowEngine() ? 0 : 4,
       show: frame => this.showFrame(frame),
       release: frame => this.releaseFrame(frame),
       busy: () => !!(this.state.previewing || this.state.rendering),
       hidden: () => typeof document !== 'undefined' && document.hidden,
-      publish: ({playing, frame, ready}) => {
+      publish: ({playing, frame, ready, primed}) => {
         const a = this.state.animation;
-        if (!a || (a.playing === playing && a.frame === frame && a.ready === ready)) return;
-        this.mutate(s => { if (s.animation) { s.animation = {...s.animation, playing, frame, ready}; } });
+        if (!a || (a.playing === playing && a.frame === frame && a.ready === ready && !!a.primed === primed)) return;
+        this.mutate(s => { if (s.animation) { s.animation = {...s.animation, playing, frame, ready, primed}; } });
       },
       error: e => {
         console.error('Error while rendering an animation frame:', e);
@@ -576,7 +579,7 @@ export class Model {
         try {
           const output = await job;
           const t1 = performance.now();
-          const {displayFile, is2D} = await this.toDisplayFile(output, features, renderAnimationFrameInSlot(slot));
+          const {displayFile, is2D, bounds} = await this.toDisplayFile(output, features, renderAnimationFrameInSlot(slot));
           const t2 = performance.now();
           const displayFileURL = await readFileAsDataURL(displayFile);
           if (killed) return;
@@ -587,6 +590,7 @@ export class Model {
             url: displayFileURL,
             bytes: output.outFile.size + Math.round(displayFile.size * 1.4),
             is2D,
+            bounds,
             output: {
               outFile: output.outFile,
               outFileURL,
@@ -595,6 +599,7 @@ export class Model {
               elapsedMillis: output.elapsedMillis,
               formattedElapsedMillis: formatMillis(output.elapsedMillis),
               formattedOutFileSize: formatBytes(output.outFile.size),
+              bounds,
             },
           });
         } catch (e) {
@@ -615,6 +620,11 @@ export class Model {
     });
   }
 
+  /** Union of the bounds of the rendered frames (undefined when none): what the camera is framed on. */
+  animationBounds(): Bounds | undefined {
+    return unionBounds(this.animation.cache.keys().map(k => this.animation.cache.peek(k)?.bounds));
+  }
+
   private releaseFrame(frame: RenderedFrame) {
     const url = frame.output.outFileURL;
     this.frameUrls.delete(url);
@@ -629,9 +639,10 @@ export class Model {
   }
 
   /** The displayable form of a render: 2D outputs are extruded, OFF is converted to GLB. */
-  private async toDisplayFile(output: RenderOutput, features: string[] | undefined, renderFn: typeof render): Promise<{displayFile: File, is2D: boolean}> {
+  private async toDisplayFile(output: RenderOutput, features: string[] | undefined, renderFn: typeof render): Promise<{displayFile: File, is2D: boolean, bounds?: Bounds}> {
     let displayFile = output.outFile;
     let is2D = false;
+    let bounds: Bounds | undefined;
     if (output.outFile.name.endsWith('.svg') || output.outFile.name.endsWith('.dxf')) {
       is2D = true;
       const fn = output.outFile.name;
@@ -658,9 +669,10 @@ export class Model {
     }
     if (displayFile.name.endsWith('.off')) {
       const offData = parseOff(await displayFile.text());
+      bounds = boundsOfVertices(offData.vertices);
       displayFile = new File([await exportGlb(offData)], displayFile.name.replace('.off', '.glb'));
     }
-    return {displayFile, is2D};
+    return {displayFile, is2D, bounds};
   }
 
   async render({isPreview, mountArchives, now, retryInOtherDim}: {isPreview: boolean, mountArchives?: boolean, now: boolean, retryInOtherDim?: boolean}) {
@@ -760,6 +772,7 @@ export class Model {
           elapsedMillis: output.elapsedMillis,
           formattedElapsedMillis: formatMillis(output.elapsedMillis),
           formattedOutFileSize: formatBytes(output.outFile.size),
+          bounds: shown.bounds,
         };
 
         if (!isPreview) {

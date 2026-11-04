@@ -1,12 +1,13 @@
 // Portions of this file are Copyright 2021 Google LLC, and licensed under GPL2+. See COPYING.
 
-import { CSSProperties, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { CSSProperties, forwardRef, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ModelContext } from './contexts.ts';
 import { Toast } from 'primereact/toast';
 import { notify, visuallyHidden, type NotifyLevel, type NotifyOptions } from '../state/notify.ts';
 import { blurHashToImage, imageToBlurhash, imageToThumbhash, thumbHashToImage } from '../io/image_hashes.ts';
 import { resolveUrl } from '../resource-loader.ts';
 import type { CameraState, CapturedImage, CaptureOptions } from '../state/mcp-tools.ts';
+import { refit, type Bounds, type Vec3 } from '../state/animation-bounds.ts';
 import { fitSize, type ResolvedCamera } from '../state/mcp-tools-logic.ts';
 
 export interface CameraInfo {
@@ -78,19 +79,43 @@ async function probeFitRadius(mv: any): Promise<number | undefined> {
   return Number.isFinite(fit) && fit > 0 ? fit : undefined;
 }
 
-function readCameraLock(mv: any) {
-  const o = mv.getCameraOrbit();
-  const t = mv.getCameraTarget();
-  return { orbit: `${o.theta}rad ${o.phi}rad ${o.radius}m`, target: `${t.x}m ${t.y}m ${t.z}m`, fov: mv.getFieldOfView() };
+/**
+ * The camera of an animation, fixed while its frames swap in (model-viewer would re-frame and re-center on every
+ * frame, which makes the model jump and rescale). Numbers only: nothing is left on `auto` for model-viewer to re-fit.
+ */
+interface CameraLock {
+  theta: number, phi: number, radius: number, target: Vec3, fov: number,
+  /** Bounds of the model the camera was framed on, and whether it was widened to the whole loop since (once). */
+  bounds?: Bounds, fitted: boolean,
+  /** The user (or a tool) set this camera: it is kept as is. */
+  userAdjusted: boolean,
 }
 
-function applyCameraLock(mv: any, lock: { orbit: string, target: string, fov: number } | null) {
+function readCameraLock(mv: any, bounds: Bounds | undefined, userAdjusted: boolean): CameraLock {
+  const o = mv.getCameraOrbit();
+  const t = mv.getCameraTarget();
+  return { theta: o.theta, phi: o.phi, radius: o.radius, target: [t.x, t.y, t.z], fov: mv.getFieldOfView(), bounds, fitted: userAdjusted, userAdjusted };
+}
+
+/** Widen a lock (before playback starts moving) so that it frames every frame of the loop. */
+function fitLockToLoop(lock: CameraLock, loop: Bounds | undefined) {
+  lock.fitted = true;
+  if (lock.userAdjusted || !lock.bounds || !loop) return;
+  const f = refit(lock.bounds, loop);
+  if (!f) return;
+  lock.radius *= f.scale;
+  lock.target = [lock.target[0] + f.shift[0], lock.target[1] + f.shift[1], lock.target[2] + f.shift[2]];
+}
+
+function applyCameraLock(mv: any, lock: CameraLock | null) {
   if (!mv || !lock) return;
   widenCameraLimits(mv);
-  mv.cameraOrbit = lock.orbit;
-  mv.cameraTarget = lock.target;
+  mv.cameraOrbit = `${lock.theta}rad ${lock.phi}rad ${lock.radius}m`;
+  mv.cameraTarget = `${lock.target[0]}m ${lock.target[1]}m ${lock.target[2]}m`;
   mv.fieldOfView = `${lock.fov}deg`;
+  // (model-viewer takes the new goal in on its next update: jump to it then, or the camera glides there.)
   mv.jumpCameraToGoal();
+  mv.updateComplete?.then(() => mv.jumpCameraToGoal());
 }
 
 declare module 'react' {
@@ -167,7 +192,23 @@ function ViewerPanelInner({className, style, viewerRef, disableZoom, onCameraCha
   loadStatusRef.current = { loaded: loadedUri === modelUri, hasModel: modelUri !== '' };
   // Animation: frames have different bounds, and model-viewer re-frames (re-centers!) on every model: keep the camera
   // the user had when the animation started (or last moved it), see applyCameraLock.
-  const cameraLockRef = useRef<{ orbit: string, target: string, fov: number } | null>(null);
+  const cameraLockRef = useRef<CameraLock | null>(null);
+  /** Bounds of the model model-viewer has loaded (animated models). */
+  const loadedBoundsRef = useRef<Bounds | undefined>(undefined);
+  /** The user moved the camera since the last normal render (model-viewer frames each new model afresh): keep it. */
+  const userMovedCameraRef = useRef(false);
+
+  // Take the lock (render phase: model-viewer still shows, and is framed on, the previous model) when the first
+  // animation frame is about to swap in; when playback starts moving, widen it once to the bounds of the key frames
+  // (never again: no re-framing while playing or scrubbing). Released when a normal render shows.
+  if (!state.animation?.showing) {
+    cameraLockRef.current = null;
+  } else {
+    const mv = modelViewerRef.current;
+    if (!cameraLockRef.current && mv?.loaded) cameraLockRef.current = readCameraLock(mv, loadedBoundsRef.current, userMovedCameraRef.current);
+    const lock = cameraLockRef.current;
+    if (lock && !lock.fitted && state.animation.primed) fitLockToLoop(lock, model.animationBounds());
+  }
 
   const skyboxUrl = useMemo(() => resolveUrl('./skybox-lights.jpg'), []);
   const axesUrl = useMemo(() => resolveUrl('./axes.glb'), []);
@@ -190,6 +231,8 @@ function ViewerPanelInner({className, style, viewerRef, disableZoom, onCameraCha
   const onLoad = useCallback(async (e: any) => {
     setLoadedUri(modelUri);
     const animating = !!model?.state.animation?.showing;
+    loadedBoundsRef.current = model?.state.output?.bounds;
+    if (!animating) userMovedCameraRef.current = false;
     if (animating) applyCameraLock(modelViewerRef.current, cameraLockRef.current);
     model?.animation.notifyLoaded();
     if (animating) return; // (no thumbnail per frame)
@@ -214,12 +257,10 @@ function ViewerPanelInner({className, style, viewerRef, disableZoom, onCameraCha
   }, [modelViewerRef.current, onLoad]);
 
 
-  // Take the camera lock just before the first animation frame swaps in; release it when a normal render shows.
-  useEffect(() => {
-    if (!state.animation?.showing) { cameraLockRef.current = null; return; }
-    const mv = modelViewerRef.current;
-    if (!cameraLockRef.current && mv?.loaded) cameraLockRef.current = readCameraLock(mv);
-  }, [modelUri, !!state.animation?.showing]);
+  // The new frame is in the DOM, not loaded yet: put the locked camera in place right away.
+  useLayoutEffect(() => {
+    if (state.animation?.showing) applyCameraLock(modelViewerRef.current, cameraLockRef.current);
+  }, [modelUri, !!state.animation?.showing, !!state.animation?.primed]);
 
   for (const ref of [modelViewerRef, axesViewerRef]) {
     const otherRef = ref === modelViewerRef ? axesViewerRef : modelViewerRef;
@@ -235,7 +276,8 @@ function ViewerPanelInner({className, style, viewerRef, disableZoom, onCameraCha
           otherRef.current.cameraOrbit = cameraOrbit.toString();
           // Notify parent (e.g. McpApp) when camera changes on main viewer
           if (ref === modelViewerRef) {
-            if (cameraLockRef.current) cameraLockRef.current = readCameraLock(ref.current);
+            userMovedCameraRef.current = true;
+            if (cameraLockRef.current) cameraLockRef.current = readCameraLock(ref.current, cameraLockRef.current.bounds, true);
             onCameraChange?.();
           }
         }
@@ -258,7 +300,8 @@ function ViewerPanelInner({className, style, viewerRef, disableZoom, onCameraCha
       const orbit = el.getCameraOrbit();
       orbit.radius *= factor;
       el.cameraOrbit = orbit.toString();
-      if (cameraLockRef.current) cameraLockRef.current = { ...cameraLockRef.current, orbit: orbit.toString() };
+      userMovedCameraRef.current = true;
+      if (cameraLockRef.current) cameraLockRef.current = { ...cameraLockRef.current, radius: orbit.radius, userAdjusted: true, fitted: true };
       onCameraChange?.();
     };
     el.addEventListener('wheel', handler, { passive: false });
@@ -360,7 +403,8 @@ function ViewerPanelInner({className, style, viewerRef, disableZoom, onCameraCha
       const orbit = mv.getCameraOrbit();
       orbit.radius *= factor;
       mv.cameraOrbit = orbit.toString();
-      if (cameraLockRef.current) cameraLockRef.current = { ...cameraLockRef.current, orbit: orbit.toString() };
+      userMovedCameraRef.current = true;
+      if (cameraLockRef.current) cameraLockRef.current = { ...cameraLockRef.current, radius: orbit.radius, userAdjusted: true, fitted: true };
       // Don't sync radius to axes — only angles
     },
     autoFit() {
@@ -404,7 +448,8 @@ function ViewerPanelInner({className, style, viewerRef, disableZoom, onCameraCha
         axesViewerRef.current.cameraOrbit = `${r.theta}rad ${r.phi}rad auto`;
       }
       await nextFrames(2);
-      if (cameraLockRef.current) cameraLockRef.current = readCameraLock(mv);
+      userMovedCameraRef.current = true;
+      if (cameraLockRef.current) cameraLockRef.current = readCameraLock(mv, cameraLockRef.current.bounds, true);
       onCameraChange?.();
       return await readCamera();
     },

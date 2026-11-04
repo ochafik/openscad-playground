@@ -5,6 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { projectUsesAnimationTime, stripCommentsAndStrings, usesAnimationTime } from "../src/state/animation-detect.ts";
+import { boundsOfVertices, refit, radiusOf, unionBounds, centerOf } from "../src/state/animation-bounds.ts";
 import { FrameCache, frameKey, projectKey } from "../src/state/animation-cache.ts";
 import {
   AnimationController, animationPoolSize, clampSettings, frameAt, nearestCached, normalizeStoredSettings, SEEK_DEBOUNCE_MS, LOAD_TIMEOUT_MS,
@@ -45,7 +46,7 @@ const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve();
 
 interface TestFrame extends AnimationFrame { t: number; released?: boolean }
 
-function makeHost(clock: FakeClock, settings: AnimationSettings = { steps: 4, fps: 10 }, pool = { size: 1 }) {
+function makeHost(clock: FakeClock, settings: AnimationSettings = { steps: 4, fps: 10 }, pool: { size: number, keyframes?: number } = { size: 1 }) {
   const log = {
     rendered: [] as number[], shown: [] as number[], released: [] as number[], published: [] as any[], errors: [] as unknown[],
     killed: 0, busy: false, hidden: false, slots: [] as number[],
@@ -68,6 +69,7 @@ function makeHost(clock: FakeClock, settings: AnimationSettings = { steps: 4, fp
     busy: () => log.busy,
     hidden: () => log.hidden,
     publish: s => log.published.push(s),
+    keyframes: () => pool.keyframes ?? 0,
     error: e => log.errors.push(e),
     lookahead: () => 8,
   };
@@ -172,9 +174,9 @@ async function main() {
   });
 
   // ─── Controller ───────────────────────────────────────────────────────
-  const setup = (settings?: AnimationSettings, poolSize = 1) => {
+  const setup = (settings?: AnimationSettings, poolSize = 1, keyframes = 0) => {
     const clock = new FakeClock();
-    const h = makeHost(clock, settings, { size: poolSize });
+    const h = makeHost(clock, settings, { size: poolSize, keyframes });
     const c = new AnimationController<TestFrame>(h.host, clock);
     c.invalidate("proj");
     return { clock, c, ...h };
@@ -408,6 +410,55 @@ async function main() {
     assert.equal(log.errors.length, 1);
     assert.equal(log.killed, 2, "the other renders were killed");
     c.dispose();
+  });
+
+
+  // ─── Key frames (camera framing) ──────────────────────────────────────
+  await test("priming: motion starts once the current frame and the key frames are rendered, key frames first", async () => {
+    const { c, clock, log, pending, finish } = setup({ steps: 12, fps: 10 }, 2, 4);
+    c.play(); await flush();
+    assert.deepEqual(log.rendered, [0, 0.25], "current frame and the first key frame");
+    assert.ok(log.published.every(p => !p.primed));
+    await finish(0); await finish(0);
+    assert.deepEqual(log.rendered.slice(2, 4), [0.5, 0.75], "the other key frames");
+    assert.deepEqual(log.shown, [], "not moving yet");
+    await finish(0);
+    assert.deepEqual(log.shown, [], "one key frame missing");
+    await finish(0);
+    assert.ok(log.published.some(p => p.primed), "primed once all four are there");
+    assert.deepEqual(log.shown, [], "primed, but the next frame is still being rendered");
+    await finish(0);
+    assert.equal(log.shown[0], 1, "then playback starts at the next frame");
+    c.dispose();
+  });
+  await test("priming: is not repeated after a pause, but is after an edit", async () => {
+    const { c, clock, log, pending, finishAll } = setup({ steps: 8, fps: 10 }, 2, 4);
+    c.play(); await flush();
+    await finishAll(); await clock.advance(0); c.notifyLoaded();
+    assert.ok(log.published.some(p => p.primed));
+    c.pause(); c.play(); await flush();
+    await clock.advance(0);
+    assert.ok(log.published[log.published.length - 1].primed);
+    c.invalidate("other");
+    assert.ok(!log.published[log.published.length - 1].primed);
+    c.dispose();
+  });
+  await test("bounds: union, radius and refit (orbiting part)", () => {
+    const ring = (angle: number) => {
+      const a = angle * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+      const cube = [15, 23].flatMap(x => [0, 8].flatMap(y => [-0, 8].map(z => ({ x: x * c - y * s, y: x * s + y * c, z }))));
+      const sphere = [-6, 6].flatMap(x => [-6, 6].flatMap(y => [-6, 6].map(z => ({ x, y, z }))));
+      return boundsOfVertices([...cube, ...sphere])!;
+    };
+    const b0 = ring(0);
+    const u = unionBounds([0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330].map(ring))!;
+    assert.ok(u.min[0] < b0.min[0] && u.max[1] > b0.max[1]);
+    assert.ok(radiusOf(u) > radiusOf(b0));
+    const fit = refit(b0, u)!;
+    assert.ok(fit.scale > 1.2 && fit.scale < 3, `scale ${fit.scale}`);
+    assert.ok(Math.abs(fit.shift[0] - (centerOf(u)[0] - centerOf(b0)[0])) < 1e-9);
+    assert.equal(refit(b0, b0), undefined, "nothing to do when the union is the frame itself");
+    assert.equal(boundsOfVertices([]), undefined);
   });
 
   console.log(`${passed} animation tests passed`);

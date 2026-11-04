@@ -1,5 +1,6 @@
 // Portions of this file are Copyright 2021 Google LLC, and licensed under GPL2+. See COPYING.
 
+import type { Bounds } from './animation-bounds.ts';
 import type { MarkerData } from '../runner/marker-types';
 import { ParameterSet } from './customizer-types.ts';
 import { VALID_EXPORT_FORMATS_2D, VALID_EXPORT_FORMATS_3D } from './formats.ts';
@@ -22,6 +23,8 @@ export interface FileOutput {
   elapsedMillis: number,
   formattedElapsedMillis: string,
   formattedOutFileSize: string,
+  /** Bounds of the displayed model (animated models only: used to frame the camera, see state/animation-bounds.ts). */
+  bounds?: Bounds,
 }
 
 export interface State {
@@ -76,6 +79,8 @@ export interface State {
     frame: number,
     /** Frames rendered so far (of `steps`). */
     ready: number,
+    /** Playback is moving: the camera framing is final (see AnimationInfo.primed). */
+    primed?: boolean,
     /** The displayed model is a cached animation frame (rather than the result of a normal render). */
     showing: boolean,
   },

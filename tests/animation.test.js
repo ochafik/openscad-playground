@@ -256,4 +256,111 @@ describe('animation', () => {
     await frame.waitForSelector(`[role=toolbar] ${PAUSE}`);
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].location?.url?.endsWith('/favicon.ico')) messages.splice(i, 1);
   }, longTimeout);
+
+  describe('camera', () => {
+    // A part orbiting a fixed sphere: the bounds of the model change with $t, the sphere must not move on screen.
+    const ORBIT = 'rotate([0,0,$t*360]) translate([15,0,0]) cube(8); sphere(6);';
+
+    /** model-viewer's camera (and the attributes that would make it re-frame), plus the displayed model. */
+    const camera = () => page.evaluate(() => {
+      const v = document.querySelector('model-viewer.main-viewer');
+      const o = v.getCameraOrbit(), t = v.getCameraTarget();
+      return { radius: o.radius, theta: o.theta, phi: o.phi, target: [t.x, t.y, t.z], fov: v.getFieldOfView(), src: v.src.slice(-40) };
+    });
+    const sameCamera = (a, b, eps = 1e-3) => {
+      for (const k of ['radius', 'theta', 'phi', 'fov']) expect(Math.abs(a[k] - b[k])).toBeLessThan(eps);
+      a.target.forEach((x, i) => expect(Math.abs(x - b.target[i])).toBeLessThan(eps));
+    };
+    const settle = async () => {
+      await page.waitForFunction(() => document.querySelector('model-viewer.main-viewer')?.loaded, { timeout: 60000 });
+      await new Promise(r => setTimeout(r, 1000)); // (the first model fades in; the camera glides to its goal)
+    };
+    /** Samples the camera on every animation frame of the page for `ms`. */
+    const sampleCamera = (ms) => page.evaluate((ms) => new Promise(resolve => {
+      const v = document.querySelector('model-viewer.main-viewer');
+      const out = [];
+      const end = performance.now() + ms;
+      const f = () => {
+        const o = v.getCameraOrbit(), t = v.getCameraTarget();
+        out.push({ radius: o.radius, theta: o.theta, phi: o.phi, target: [t.x, t.y, t.z], fov: v.getFieldOfView(), src: v.src.length + ':' + [...v.src].filter((_, i) => i % 29 === 0).reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7) });
+        performance.now() < end ? requestAnimationFrame(f) : resolve(out);
+      };
+      f();
+    }), ms);
+
+    test('playing never re-frames: radius, target and field of view are identical on every frame', async () => {
+      await load(ORBIT, { animation: { steps: 12, fps: 10 } });
+      await page.waitForSelector(PLAY, { timeout: 60000 });
+      await settle();
+      const before = await camera();
+      await page.click(PLAY);
+      await page.waitForSelector(PAUSE);
+      // Wait until the loop has played once all the way (every frame rendered and shown), then sample a full lap.
+      await waitForTime('$t=0.92');
+      await waitForTime('$t=0.00');
+      const samples = await sampleCamera(1500); // 15 frames at 10 fps: a lap and more
+      expect(new Set(samples.map(c => c.src)).size).toBeGreaterThanOrEqual(10);
+      for (const c of samples) sameCamera(c, samples[0]);
+      // The framing was widened once, before moving, to hold the whole orbit (the loop's bounding sphere is bigger than the first frame's).
+      expect(samples[0].radius).toBeGreaterThan(before.radius * 1.2);
+      // ... and centered on the orbit: x and z of the target are ~0 (the model is shown Y-up).
+      expect(Math.abs(samples[0].target[0])).toBeLessThan(1);
+      expect(Math.abs(samples[0].target[2])).toBeLessThan(1);
+      await page.click(PAUSE);
+    }, longTimeout * 2);
+
+    test('model-viewer is never left to auto-frame a swapped model', async () => {
+      await load(ORBIT, { animation: { steps: 8, fps: 10 } });
+      await page.waitForSelector(PLAY, { timeout: 60000 });
+      await settle();
+      await page.click(PLAY);
+      await waitForTime('$t=0.50');
+      const attrs = () => page.evaluate(() => {
+        const v = document.querySelector('model-viewer.main-viewer');
+        return { orbit: v.cameraOrbit, target: v.cameraTarget, fov: v.fieldOfView, min: v.minCameraOrbit, max: v.maxCameraOrbit };
+      });
+      const during = await attrs();
+      // Explicit numbers (a radius or target left on 'auto' would be re-fit by model-viewer when the model changes).
+      expect(during.orbit).not.toMatch(/auto/);
+      expect(during.target).not.toMatch(/auto/);
+      expect(during.fov).not.toMatch(/auto/);
+      // And the camera does not move when the model is swapped for another frame, scrubbing included.
+      await page.click(PAUSE);
+      const paused = await camera();
+      for (const f of [0, 3, 5, 7]) {
+        await setSlider(f);
+        await page.waitForFunction((f) => Math.abs(parseFloat(document.querySelector('[data-testid=animation-time]')?.textContent.slice(3)) - f / 8) < 0.01, { timeout: 60000 }, f);
+        await new Promise(r => setTimeout(r, 400));
+        sameCamera(await camera(), paused);
+      }
+    }, longTimeout * 2);
+
+    test('a camera the user set is kept by playback and scrubbing', async () => {
+      await load(ORBIT, { animation: { steps: 8, fps: 10 } });
+      await page.waitForSelector(PLAY, { timeout: 60000 });
+      await settle();
+      // Zoom in and orbit with the mouse.
+      const box = await (await page.$('model-viewer.main-viewer')).boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel({ deltaY: -150 });
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 20, { steps: 8 });
+      await page.mouse.up();
+      await new Promise(r => setTimeout(r, 1200));
+      const user = await camera();
+      await page.click(PLAY);
+      await waitForTime('$t=0.50');
+      const samples = await sampleCamera(800);
+      // (model-viewer's wheel zoom narrows the field of view too, and the widened limits make it settle up to a degree away from where the zoom left it: radius, target and angles are exact, the field of view is only checked within a few degrees)
+      for (const c of samples) { sameCamera({ ...c, fov: user.fov }, user, 0.05); expect(Math.abs(c.fov - samples[0].fov)).toBeLessThan(1); }
+      expect(Math.abs(samples[0].fov - user.fov)).toBeLessThan(3);
+      await page.click(PAUSE);
+      await setSlider(1);
+      await page.waitForFunction(() => /^\$t=0\.1[23]$/.test(document.querySelector('[data-testid=animation-time]')?.textContent), { timeout: 60000 });
+      await new Promise(r => setTimeout(r, 400));
+      const scrubbed = await camera();
+      sameCamera({ ...scrubbed, fov: user.fov }, user, 0.05);
+      expect(Math.abs(scrubbed.fov - samples[0].fov)).toBeLessThan(1);
+    }, longTimeout * 2);
+  });
 });

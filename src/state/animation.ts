@@ -140,11 +140,20 @@ export interface AnimationHost<F extends AnimationFrame> {
   /** The page is not visible: do not burn CPU. */
   hidden(): boolean;
   /** Mirror the controller state for the UI. */
-  publish(s: { playing: boolean; frame: number; ready: number }): void;
+  publish(s: {
+    playing: boolean; frame: number; ready: number;
+    /** The key frames are rendered (see {@link keyframes}) and playback is moving: the camera framing is final. */
+    primed: boolean;
+  }): void;
   /** A frame failed to render. */
   error(e: unknown): void;
   /** Frames rendered ahead of the displayed one while playing (bounded by the cache). */
   lookahead(): number;
+  /**
+   * Playback only starts moving once this many frames, evenly spread over the loop (and the current one), are rendered:
+   * the host can then frame the camera on all of them and keep it still for the whole loop. 0 or absent: no wait.
+   */
+  keyframes?(): number;
 }
 
 export interface AnimationTimers {
@@ -172,6 +181,7 @@ export class AnimationController<F extends AnimationFrame> {
   private loadTimer: unknown = null;
   private awaitingLoad = false;
   private stalled = false;
+  private primed = false;
   private lastShownAt = -Infinity;
   private lastUrl: string | undefined;
   private shownIndex = -1;
@@ -204,7 +214,18 @@ export class AnimationController<F extends AnimationFrame> {
     for (let i = 0, steps = this.steps(); i < steps; i++) if (this.isCached(i)) n++;
     return n;
   }
-  private publish() { this.host.publish({ playing: this.playing, frame: this.frame, ready: this.ready() }); }
+  private publish() { this.host.publish({ playing: this.playing, frame: this.frame, ready: this.ready(), primed: this.primed }); }
+
+  /** Frames to have before moving: the current one and `keyframes` evenly spread ones (none when the loop is short). */
+  private primeSet(): number[] {
+    const k = Math.min(this.host.keyframes?.() ?? 0, this.steps());
+    if (k <= 1) return [];
+    const steps = this.steps();
+    const out = new Set<number>([this.frame]);
+    for (let i = 1; i < k; i++) out.add((this.frame + Math.round(i * steps / k)) % steps);
+    return [...out];
+  }
+  private isPrimed(): boolean { return this.primed || this.primeSet().every(this.isCached); }
 
   // ── Invalidation ─────────────────────────────────────────────────────
 
@@ -216,6 +237,7 @@ export class AnimationController<F extends AnimationFrame> {
     if (key === this.key) return false;
     this.key = key;
     this.stop();
+    this.primed = false;
     this.cache.clear();
     this.lastUrl = undefined;
     this.shownIndex = -1;
@@ -290,6 +312,12 @@ export class AnimationController<F extends AnimationFrame> {
   private tick() {
     if (!this.playing) return;
     if (this.host.hidden()) { this.tickTimer = this.timers.setTimeout(() => { this.tickTimer = null; this.tick(); }, 500); return; }
+    if (!this.primed) {
+      // Moving starts once the key frames are there (the camera is then framed on all of them).
+      if (!this.isPrimed()) { this.stalled = true; this.pump(); return; }
+      this.primed = true;
+      this.publish();
+    }
     const next = (this.frame + 1) % this.steps();
     const frame = this.cache.get(this.keyOf(next));
     if (!frame) { this.stalled = true; this.pump(); return; }
@@ -367,10 +395,11 @@ export class AnimationController<F extends AnimationFrame> {
     if (this.seekTarget != null && this.seekTimer == null && !this.isCached(this.seekTarget)) out.push(this.seekTarget);
     if (this.playing) {
       const steps = this.steps();
+      if (!this.primed) for (const i of this.primeSet()) if (!this.isCached(i) && !out.includes(i)) out.push(i);
       const ahead = Math.max(1, Math.min(steps - 1, this.host.lookahead(), this.maxEntries - 2)); // (never evict what is about to be shown)
       for (let k = 1; k <= ahead; k++) {
         const i = (this.frame + k) % steps;
-        if (!this.isCached(i)) out.push(i);
+        if (!this.isCached(i) && !out.includes(i)) out.push(i);
       }
     }
     return out;
