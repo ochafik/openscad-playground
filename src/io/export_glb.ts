@@ -2,13 +2,13 @@ import { Document, NodeIO, Accessor, Primitive } from '@gltf-transform/core';
 import { Light as LightDef, KHRLightsPunctual } from '@gltf-transform/extensions';
 import { Vertex, Color, Face, IndexedPolyhedron, DEFAULT_FACE_COLOR } from './common';
 
-type Geom = {
+export type Geom = {
     positions: Float32Array<ArrayBuffer>;
     indices: Uint32Array<ArrayBuffer>;
     colors?: Float32Array<ArrayBuffer>;
 };
 
-function createPrimitive(doc: Document, baseColorFactor: Color, {positions, indices, colors}: Geom): Primitive {
+export function createPrimitive(doc: Document, baseColorFactor: Color, {positions, indices, colors}: Geom): Primitive {
     const prim = doc.createPrimitive()
         .setMode(Primitive.Mode.TRIANGLES)
         .setMaterial(
@@ -35,7 +35,7 @@ function createPrimitive(doc: Document, baseColorFactor: Color, {positions, indi
     return prim;
 }
 
-function getGeom(data: IndexedPolyhedron): Geom {
+export function getGeom(data: IndexedPolyhedron): Geom {
     let positions = new Float32Array(data.vertices.length * 3);
     const indices = new Uint32Array(data.faces.length * 3);
 
