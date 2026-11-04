@@ -8,7 +8,7 @@
 import { createEditorFS, symlinkLibraries } from "../fs/filesystem.ts";
 import { getMissingArchives, getRemovedLibraryMessages, getRequiredArchives } from "../fs/archive-deps.ts";
 import { Source } from "../state/app-state.ts";
-import { OpenSCADInvocation, OpenSCADInvocationCallback, OpenSCADInvocationResults } from "./openscad-runner.ts";
+import { OpenSCADInvocation, OpenSCADInvocationCallback, OpenSCADInvocationResults, OpenSCADTimings } from "./openscad-runner.ts";
 import { deployedArchiveNames } from "../fs/zip-archives.ts";
 import { fetchSource } from "../utils.ts";
 import UZIP from "uzip";
@@ -61,6 +61,8 @@ export function installWorkerHandler(
     loadEngine: (moduleArg: any, forceEngine?: RenderEngine) => Promise<LoadedOpenSCAD>) {
   self.addEventListener('message', async (e: MessageEvent<OpenSCADInvocation>) => {
     const invocation = e.data;
+    const bootMs = invocation.sentAt != null ? Date.now() - invocation.sentAt : undefined;
+    const scanStart = performance.now();
     let archives: string[] = [];
     if (invocation.mountArchives) {
       try {
@@ -72,8 +74,10 @@ export function installWorkerHandler(
         archives = deployedArchiveNames;
       }
     }
+    const scanMs = performance.now() - scanStart;
     const result = await runInvocation(loadEngine, invocation, archives);
     result.archives = archives;
+    result.timings = {...result.timings, workerBootMs: bootMs, scanMs};
     // The static scan can miss libraries: ask for another go with the missing ones
     // (see spawnOpenSCAD, since the engine can't run twice in the same worker).
     const missing = getMissingArchives(result.mergedOutputs.flatMap(o => o.stderr ?? []), archives);
@@ -122,6 +126,9 @@ async function runInvocation(
   let engine: RenderEngine | undefined;
   let instance: any;
   const start = performance.now();
+  const timings: OpenSCADTimings = {};
+  let mark = start;
+  const lap = (k: keyof OpenSCADTimings) => { const n = performance.now(); timings[k] = n - mark; mark = n; };
   try {
     const loaded = await loadEngine({
       noInitialRun: true,
@@ -145,6 +152,7 @@ async function runInvocation(
     }, forceEngine);
     engine = loaded.engine;
     instance = loaded.instance;
+    lap('engineMs');
 
     if (archives.length > 0) {
       instance.FS.mkdir('/libraries');
@@ -171,6 +179,7 @@ async function runInvocation(
       await symlinkLibraries(archives, instance.FS, '/libraries', "/");
     }
 
+    lap('mountMs');
     // Fonts are seemingly resolved from $(cwd)/fonts
     instance.FS.chdir("/");
 
@@ -201,6 +210,7 @@ async function runInvocation(
       }
     }
 
+    lap('inputsMs');
     console.log('Invoking OpenSCAD with: ', args)
     let exitCode;
     try {
@@ -213,6 +223,7 @@ async function runInvocation(
       }
       throw new Error(`OpenSCAD invocation failed: ${e}`);
     }
+    lap('mainMs');
     const end = performance.now();
     const elapsedMillis = end - start;
 
@@ -232,6 +243,7 @@ async function runInvocation(
       exitCode,
       elapsedMillis,
       engine,
+      timings,
     }
 
     console.debug(result);

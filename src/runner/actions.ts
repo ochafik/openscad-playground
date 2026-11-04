@@ -1,7 +1,7 @@
 // Portions of this file are Copyright 2021 Google LLC, and licensed under GPL2+. See COPYING.
 
 import type { MarkerData } from './marker-types';
-import { ProcessStreams, spawnOpenSCAD } from "./openscad-runner.ts";
+import { OpenSCADTimings, ProcessStreams, spawnOpenSCAD } from "./openscad-runner.ts";
 import { processMergedOutputs } from "./output-parser.ts";
 import { AbortablePromise, turnIntoDelayableExecution } from '../utils.ts';
 import { Source } from '../state/app-state.ts';
@@ -75,7 +75,8 @@ export type RenderOutput = {
   outFile: File,
   logText: string,
   markers: MarkerData[],
-  elapsedMillis: number}
+  elapsedMillis: number,
+  timings?: OpenSCADTimings}
 
 export type RenderArgs = {
   scadPath: string,
@@ -174,7 +175,7 @@ const renderJob = (renderArgs: RenderArgs) => {
           const type = filePath.endsWith('.svg') ? 'image/svg+xml' : 'application/octet-stream';
           let blob = new Blob([content]);
           let outFile = new File([blob], fileName, {type});
-          resolve({outFile, logText, markers, elapsedMillis: result.elapsedMillis});
+          resolve({outFile, logText, markers, elapsedMillis: result.elapsedMillis, timings: result.timings});
         } catch (e) {
           console.error(e);
           reject(e);

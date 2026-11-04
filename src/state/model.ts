@@ -558,13 +558,17 @@ export class Model {
     };
     return AbortablePromise<RenderedFrame>((resolve, reject) => {
       let killed = false;
+      const t0 = performance.now();
       const job = renderAnimationFrame(args)({now: true});
       (async () => {
         try {
           const output = await job;
+          const t1 = performance.now();
           const {displayFile, is2D} = await this.toDisplayFile(output, features, renderAnimationFrame);
+          const t2 = performance.now();
           const displayFileURL = await readFileAsDataURL(displayFile);
           if (killed) return;
+          console.debug('[anim-perf] ' + JSON.stringify({t: frameT, renderMs: Math.round(t1 - t0), convertMs: Math.round(t2 - t1), dataUrlMs: Math.round(performance.now() - t2), openscadMs: Math.round(output.elapsedMillis), ...output.timings}));
           const outFileURL = URL.createObjectURL(output.outFile);
           this.frameUrls.add(outFileURL);
           resolve({

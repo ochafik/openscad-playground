@@ -19,7 +19,27 @@ export type OpenSCADInvocation = {
   forceEngine?: RenderEngine,
   // The engine, downloaded and compiled once by the main thread (see wasm-module.ts).
   wasmModule?: WebAssembly.Module,
+  // Set by spawnOpenSCAD (Date.now() when the invocation was posted): lets the worker measure its own start-up.
+  sentAt?: number,
 }
+
+/** Where the time of an invocation went (milliseconds; see runInvocation). */
+export type OpenSCADTimings = {
+  /** From posting the invocation to the worker handling it (script load, parse, webpack chunks). */
+  workerBootMs?: number,
+  /** Selecting archives (source scan). */
+  scanMs?: number,
+  /** Emscripten module instantiation (the compiled wasm is shared). */
+  engineMs?: number,
+  /** Fetching and mounting the library archives and fonts. */
+  mountMs?: number,
+  /** Writing the inputs. */
+  inputsMs?: number,
+  /** callMain: parse + evaluate + render + export. */
+  mainMs?: number,
+  /** Whole invocation from the main thread's point of view (includes retries). */
+  totalMs?: number,
+};
 
 export type OpenSCADInvocationResults = {
   exitCode?: number,
@@ -34,6 +54,7 @@ export type OpenSCADInvocationResults = {
   missingArchives?: string[],
   // Archives that were mounted.
   archives?: string[],
+  timings?: OpenSCADTimings,
 };
 
 export type ProcessStreams = {stderr: string} | {stdout: string}
@@ -129,6 +150,7 @@ export function spawnOpenSCAD(
         if ('result' in e.data) {
           const {result} = e.data;
           // (Logged here rather than in the worker, whose early console output can be missed by observers.)
+          result.timings = {...result.timings, totalMs: Date.now() - startedAt};
           console.debug(`Mounting archives: ${result.archives?.join(', ') || '(none)'}`);
           noteUsedArchives(result.archives ?? []);
           terminate();
@@ -143,9 +165,10 @@ export function spawnOpenSCAD(
           streamsCallback(e.data);
         }
       }
-      worker.postMessage({...invocation, forceEngine})  // (with wasmModule, if any)
+      worker.postMessage({...invocation, forceEngine, sentAt: Date.now()})  // (with wasmModule, if any)
     };
     let aborted = false;
+    const startedAt = Date.now();
     getSharedWasmModule().then(wasmModule => {
       if (!aborted) run({...invocation, archives: invocation.archives ?? getForcedArchives(), wasmModule}, 2);
     });
