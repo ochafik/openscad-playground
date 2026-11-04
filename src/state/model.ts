@@ -566,6 +566,7 @@ export class Model {
       isPreview: true,
       renderFormat: this.state.is2D ? 'svg' : 'off',
       streamsCallback: () => {},
+      warmNext: true,
     };
     return AbortablePromise<RenderedFrame>((resolve, reject) => {
       let killed = false;

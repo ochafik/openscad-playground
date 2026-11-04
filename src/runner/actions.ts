@@ -88,6 +88,8 @@ export type RenderArgs = {
   mountArchives: boolean,
   renderFormat: keyof typeof VALID_EXPORT_FORMATS_2D | keyof typeof VALID_EXPORT_FORMATS_3D,
   streamsCallback: (ps: ProcessStreams) => void,
+  /** More renders will follow right away (animation frames): see OpenSCADInvocation.warmNext. */
+  warmNext?: boolean,
 }
 
 function formatValue(any: any): string {
@@ -110,6 +112,7 @@ const renderJob = (renderArgs: RenderArgs) => {
       extraArgs,
       renderFormat,
       streamsCallback,
+      warmNext,
     }  = renderArgs;
 
     const prefixLines: string[] = [];
@@ -143,6 +146,7 @@ const renderJob = (renderArgs: RenderArgs) => {
       inputs: sources.map(s => s.path === scadPath ? {path: s.path, content} : s),
       args,
       outputPaths: [outFile],
+      warmNext,
     }, streamsCallback);
 
     return AbortablePromise<RenderOutput>((resolve, reject) => {

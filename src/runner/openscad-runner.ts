@@ -19,6 +19,9 @@ export type OpenSCADInvocation = {
   forceEngine?: RenderEngine,
   // The engine, downloaded and compiled once by the main thread (see wasm-module.ts).
   wasmModule?: WebAssembly.Module,
+  // Start the next worker right away and keep it idle for the next invocation (animation frames follow each
+  // other: the ~40 ms it takes a worker to boot is then paid while the previous frame renders, see takeWarmWorker).
+  warmNext?: boolean,
   // Set by spawnOpenSCAD (Date.now() when the invocation was posted): lets the worker measure its own start-up.
   sentAt?: number,
 }
@@ -122,6 +125,29 @@ function getForcedArchives(): string[] | undefined {
   }
 }
 
+const WARM_MAX = 4;
+const WARM_IDLE_MS = 15000;
+const warmWorkers: {worker: Worker, timer: ReturnType<typeof setTimeout>}[] = [];
+
+/** Boots a worker (script download + parse) ahead of time. Idle ones are dropped after a while. */
+function warmUpWorker() {
+  if (warmWorkers.length >= WARM_MAX) return;
+  const worker = createWorker(resolveUrl('./openscad-worker.js'));
+  worker.onerror = (e) => e.preventDefault();
+  const entry = {worker, timer: setTimeout(() => {
+    warmWorkers.splice(warmWorkers.indexOf(entry), 1);
+    worker.terminate();
+  }, WARM_IDLE_MS)};
+  warmWorkers.push(entry);
+}
+
+function takeWarmWorker(): Worker | undefined {
+  const entry = warmWorkers.shift();
+  if (!entry) return undefined;
+  clearTimeout(entry.timer);
+  return entry.worker;
+}
+
 export function spawnOpenSCAD(
   invocation: OpenSCADInvocation, 
   streamsCallback: (ps: ProcessStreams) => void
@@ -142,7 +168,8 @@ export function spawnOpenSCAD(
     const forceEngine = invocation.forceEngine ?? getForcedEngine();
     // Each attempt runs in a fresh worker: an Emscripten module can't be run twice.
     const run = (invocation: OpenSCADInvocation, retriesLeft: number) => {
-      const thisWorker = worker = createWorker(resolveUrl('./openscad-worker.js'));
+      const thisWorker = worker = takeWarmWorker() ?? createWorker(resolveUrl('./openscad-worker.js'));
+      if (invocation.warmNext) warmUpWorker();
       // Killing a job whose worker is still loading its scripts makes those loads fail with an uncaught error event
       // (routine now that animation frames are cancelled whenever the user edits): ignore errors of dead workers.
       thisWorker.onerror = (e) => { if (worker !== thisWorker) e.preventDefault(); };
