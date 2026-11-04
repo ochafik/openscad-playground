@@ -435,6 +435,47 @@ export class Model {
     return result.outFile;
   }
 
+  /** Identifies what a render of the current source, customizer values, features and animation time produces. */
+  private renderKey(): string {
+    return `${projectKey(this.state.params)}@${this.state.animation ? this.animationTime.toFixed(6) : ''}`;
+  }
+
+  private fullRender?: { key: string, done: Promise<void> };
+
+  /**
+   * Guarantee that `state.output` is a full (non-preview) render of the current source, customizer values and
+   * animation time (the current frame), rendering one if it is only a preview (or an animation frame), stale (an
+   * edit whose preview has not landed yet) or missing. Concurrent callers share one render. Rejects when the render
+   * fails or the project keeps changing under it.
+   */
+  async ensureFullRender(): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const key = this.renderKey();
+      const out = this.state.output;
+      const current = !!out && !out.isPreview && out.key === key;
+      const busy = !!(this.state.rendering || this.state.previewing);
+      if (current && !busy) return;
+      if (this.fullRender?.key !== key) {
+        const done = this.render({isPreview: false, now: true});
+        const entry = {key, done};
+        this.fullRender = entry;
+        const clear = () => { if (this.fullRender === entry) this.fullRender = undefined; };
+        done.then(clear, clear);
+      }
+      await this.fullRender!.done;
+      const now = this.state.output;
+      if (now && !now.isPreview && now.key === this.renderKey()) return;
+      if (this.state.error) throw new Error(this.state.error);
+    }
+    throw new Error('The model kept changing while rendering; try again');
+  }
+
+  /** The current model in `format`, exported from a full render (see ensureFullRender). */
+  async exportCurrent(format: ExportFormat): Promise<File> {
+    await this.ensureFullRender();
+    return this.exportFile(format);
+  }
+
   async saveProject() {
     if (this.state.params.sources.length == 1) {
       const content = this.state.params.sources[0].content;
@@ -659,6 +700,7 @@ export class Model {
       }
     }
     this.syncAnimation(isPreview);
+    const key = this.renderKey();
     // This call supersedes any older one (see renderGen): its busy flag replaces the older call's.
     const gen = ++this.renderGen;
     this.mutate(s => {
@@ -737,6 +779,7 @@ export class Model {
 
         s.output = {
           isPreview: isPreview,
+          key,
           outFile: output.outFile,
           outFileURL,
           displayFile,

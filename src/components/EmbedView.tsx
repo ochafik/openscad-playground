@@ -420,15 +420,18 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
           />
         </span>
         {onDownload && (
+          <span className={downloading && busyNow ? 'embed-spin' : undefined} style={{ display: 'flex' }}>
           <CornerButton
-            icon={EmbedIcons.download}
-            label={downloading ? 'Exporting…' : 'Download'}
+            icon={downloading && busyNow ? EmbedIcons.spinner : EmbedIcons.download}
+            // A download first guarantees a full render of what is shown; say so while that runs.
+            label={downloading ? (busyNow ? 'Rendering…' : 'Exporting…') : 'Download'}
             disabled={downloading || !state.output}
             ariaExpanded={menuOpen}
             ariaHaspopup="menu"
             buttonRef={downloadBtnRef}
             onClick={() => setMenuOpen(o => !o)}
           />
+          </span>
         )}
         {toolbar}
         {fullscreen && (

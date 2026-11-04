@@ -755,6 +755,84 @@ describe('embed render and download', () => {
   }, longTimeout);
 });
 
+describe('embed download renders in full first', () => {
+  // `$preview` is the one difference between a preview and a full render (same engine and backend): the preview
+  // is the small cube, the full render the big one. ECHO lines tell the renders apart.
+  const code = 'size = 5; // [1:20]\necho(P = $preview);\ncube($preview ? size : size * 2);';
+  const fullRenders = () => messages.filter(m => m.type === 'debug' && /ECHO: P = false/.test(m.text)).length;
+  const stlBounds = (bytes) => {
+    const buf = Buffer.from(bytes);
+    const n = buf.readUInt32LE(80);
+    let max = -Infinity;
+    for (let i = 0; i < n; i++) for (let v = 0; v < 3; v++) for (let c = 0; c < 3; c++) max = Math.max(max, buf.readFloatLE(84 + i * 50 + 12 + v * 12 + c * 4));
+    return { facets: n, max, hash: require('crypto').createHash('sha1').update(buf.subarray(84)).digest('hex') };
+  };
+  const downloadStl = async () => {
+    await page.evaluate(() => {
+      window.__downloads = [];
+      HTMLAnchorElement.prototype.click = function () { window.__downloads.push({ href: this.href, name: this.download }); };
+    });
+    await page.click('button[aria-label="Download"]');
+    await page.waitForSelector('[role=menu][aria-label="Download format"]');
+    await page.click('[role=menuitem]:nth-child(2)'); // STL
+    await page.waitForFunction(() => window.__downloads.length === 1, { timeout: 90000 });
+    return stlBounds(await page.evaluate(async () => Array.from(new Uint8Array(await (await fetch(window.__downloads[0].href)).arrayBuffer()))));
+  };
+
+  test('Download after a customizer edit (preview only) exports a full render, equal to F6 then Download, with one full render', async () => {
+    await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent(code)}`);
+    await waitForViewer();
+    await page.waitForSelector('button[aria-label="Customize"]', { timeout: 45000 });
+    await page.click('button[aria-label="Customize"]');
+    await page.waitForSelector('[role=complementary][aria-label=Customizer] input.p-inputnumber-input');
+    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 45000 });
+    await page.click('[role=complementary][aria-label=Customizer] input.p-inputnumber-input');
+    await page.$eval('[role=complementary][aria-label=Customizer] input.p-inputnumber-input', e => e.select());
+    await page.keyboard.type('6');
+    await page.keyboard.press('Tab');
+    // The edit's preview may or may not have landed: Download must not depend on it.
+    expect(fullRenders()).toBe(0);
+    const edited = await downloadStl();
+    expect(edited.facets).toBe(12);
+    expect(edited.max).toBeCloseTo(12, 3); // the full render (size * 2), not the preview (6)
+    expect(fullRenders()).toBe(1);
+    await page.waitForFunction(() => /^Downloaded playground\.stl/.test(document.querySelector('[role=status][aria-live=polite]')?.textContent ?? ''));
+
+    // Same project, rendered in full explicitly (F6) first: identical geometry.
+    await page.goto('about:blank');
+    messages.length = 0;
+    await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent(code.replace('size = 5', 'size = 6'))}`);
+    await waitForViewer();
+    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 45000 });
+    await page.keyboard.press('F6');
+    await page.waitForFunction(() => document.querySelector('model-viewer.main-viewer').src.startsWith('data:'), { timeout: 60000 });
+    await new Promise(r => setTimeout(r, 3000));
+    const explicit = await downloadStl();
+    expect(explicit.hash).toBe(edited.hash);
+    expect(fullRenders()).toBe(1); // F6's, the download reused it
+  }, longTimeout * 3);
+
+  test('Download right after an edit that follows a full render does not export the stale render', async () => {
+    await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent(code)}`);
+    await waitForViewer();
+    await page.waitForSelector('button[aria-label="Customize"]', { timeout: 45000 });
+    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 45000 });
+    await page.keyboard.press('F6');
+    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 60000 });
+    await new Promise(r => setTimeout(r, 1500));
+    expect(fullRenders()).toBe(1);
+    await page.click('button[aria-label="Customize"]');
+    await page.waitForSelector('[role=complementary][aria-label=Customizer] input.p-inputnumber-input');
+    await page.click('[role=complementary][aria-label=Customizer] input.p-inputnumber-input');
+    await page.$eval('[role=complementary][aria-label=Customizer] input.p-inputnumber-input', e => e.select());
+    await page.keyboard.type('7');
+    await page.keyboard.press('Tab');
+    const dl = await downloadStl(); // (the edit's debounced preview has not necessarily landed)
+    expect(dl.max).toBeCloseTo(14, 3);
+    expect(fullRenders()).toBe(2); // F6's, then exactly one for the edited project
+  }, longTimeout * 2);
+});
+
 describe('full app export menu', () => {
   test('the dropdown starts with SCAD (source), which downloads the active file', async () => {
     const code = 'cube(5);';

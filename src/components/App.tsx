@@ -58,8 +58,7 @@ export function App({initialState, statePersister, fs}: {initialState: State, st
   const fullscreen = useFullscreenApi();
   // Plain browser download (works at top level; a sandboxed frame may block it).
   const onDownload = async (format: ExportFormat) => {
-    if (model.state.output?.isPreview) await model.render({isPreview: false, now: true});
-    const file = await model.exportFile(format);
+    const file = await model.exportCurrent(format);
     const stem = (model.state.params.activePath.split('/').pop() ?? 'model').replace(/\.[^.]+$/, '');
     const name = buildFilename(undefined, stem, format);
     const url = URL.createObjectURL(file);

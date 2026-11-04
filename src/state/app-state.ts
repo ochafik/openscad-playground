@@ -96,6 +96,8 @@ export interface State {
   is2D?: boolean,
   output?: FileOutput & {
     isPreview: boolean,
+    /** What the render was made from (see Model.renderKey()); lets exports tell whether a full render is current. */
+    key?: string,
   },
   export?: FileOutput,
 };

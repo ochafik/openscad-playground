@@ -517,7 +517,7 @@ export function McpApp({
   }, [app]);
   const onDownload = useCallback(async (format: ExportFormat) => {
     const m = modelRef.current;
-    if (m.state.output?.isPreview) await m.render({ isPreview: false, now: true });
+    await m.ensureFullRender();
     return deliverUi(await exportAsFile(m, format));
   }, [deliverUi]);
   const onDownloadSource = useCallback(async () => deliverUi(await exportAsFile(modelRef.current, 'scad')), [deliverUi]);
