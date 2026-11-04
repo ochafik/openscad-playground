@@ -193,8 +193,11 @@ export const render = turnIntoDelayableExecution(renderDelay, renderJob);
  * cancel the displayed render nor be cancelled by it.
  */
 export const renderIsolated = turnIntoDelayableExecution(renderDelay, renderJob);
+/** Upper bound of the number of frames rendered at the same time (see animationPoolSize). */
+export const MAX_FRAME_SLOTS = 8;
 /**
- * Same job again, in its own slot: animation frames are rendered in the background and neither cancel the displayed
- * render nor are cancelled by it (the animation controller yields explicitly, see state/animation.ts).
+ * One supersede slot per parallel frame render: a render only supersedes the previous one of its own slot (the
+ * animation controller hands out the slots and kills what it no longer wants).
  */
-export const renderAnimationFrame = turnIntoDelayableExecution(renderDelay, renderJob);
+const frameSlots = Array.from({length: MAX_FRAME_SLOTS}, () => turnIntoDelayableExecution(renderDelay, renderJob));
+export const renderAnimationFrameInSlot = (slot: number) => frameSlots[Math.min(Math.max(0, slot), MAX_FRAME_SLOTS - 1)];

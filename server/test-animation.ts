@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { projectUsesAnimationTime, stripCommentsAndStrings, usesAnimationTime } from "../src/state/animation-detect.ts";
 import { FrameCache, frameKey, projectKey } from "../src/state/animation-cache.ts";
 import {
-  AnimationController, clampSettings, frameAt, nearestCached, normalizeStoredSettings, SEEK_DEBOUNCE_MS, LOAD_TIMEOUT_MS,
+  AnimationController, animationPoolSize, clampSettings, frameAt, nearestCached, normalizeStoredSettings, SEEK_DEBOUNCE_MS, LOAD_TIMEOUT_MS,
   type AnimationFrame, type AnimationHost, type AnimationSettings, type AnimationTimers,
 } from "../src/state/animation.ts";
 import { AbortablePromise, SupersededError } from "../src/utils.ts";
@@ -45,16 +45,18 @@ const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve();
 
 interface TestFrame extends AnimationFrame { t: number; released?: boolean }
 
-function makeHost(clock: FakeClock, settings: AnimationSettings = { steps: 4, fps: 10 }) {
+function makeHost(clock: FakeClock, settings: AnimationSettings = { steps: 4, fps: 10 }, pool = { size: 1 }) {
   const log = {
     rendered: [] as number[], shown: [] as number[], released: [] as number[], published: [] as any[], errors: [] as unknown[],
-    killed: 0, busy: false, hidden: false,
+    killed: 0, busy: false, hidden: false, slots: [] as number[],
   };
   const pending: Array<{ t: number; resolve: () => void; fail: (e: unknown) => void }> = [];
   const host: AnimationHost<TestFrame> = {
     settings: () => settings,
-    renderFrame: t => {
+    concurrency: () => pool.size,
+    renderFrame: (t, slot) => {
       log.rendered.push(t);
+      log.slots.push(slot);
       return AbortablePromise<TestFrame>((resolve, reject) => {
         const entry = { t, resolve: () => resolve({ t, bytes: 10, url: `frame:${t}` }), fail: reject };
         pending.push(entry);
@@ -70,9 +72,9 @@ function makeHost(clock: FakeClock, settings: AnimationSettings = { steps: 4, fp
     lookahead: () => 8,
   };
   /** Complete the oldest pending render. */
-  const finish = async () => { pending.shift()!.resolve(); await flush(); await clock.advance(0); };
+  const finish = async (which = 0) => { pending.splice(which, 1)[0].resolve(); await flush(); await clock.advance(0); };
   const finishAll = async () => { while (pending.length) await finish(); };
-  return { host, log, pending, finish, finishAll, settings };
+  return { host, log, pending, finish, finishAll, settings, pool };
 }
 
 async function main() {
@@ -170,9 +172,9 @@ async function main() {
   });
 
   // ─── Controller ───────────────────────────────────────────────────────
-  const setup = (settings?: AnimationSettings) => {
+  const setup = (settings?: AnimationSettings, poolSize = 1) => {
     const clock = new FakeClock();
-    const h = makeHost(clock, settings);
+    const h = makeHost(clock, settings, { size: poolSize });
     const c = new AnimationController<TestFrame>(h.host, clock);
     c.invalidate("proj");
     return { clock, c, ...h };
@@ -326,6 +328,85 @@ async function main() {
     for (let i = 0; i < 6; i++) { await h.finishAll(); await clock.advance(100); c.notifyLoaded(); }
     assert.ok(c.cache.size <= 3);
     assert.ok(h.log.released.length > 0);
+    c.dispose();
+  });
+
+
+  // ─── Frame worker pool ────────────────────────────────────────────────
+  await test("pool size: leave a core, cap at 4, one for the JS engine and small devices", () => {
+    assert.equal(animationPoolSize({ cores: 16 }), 4);
+    assert.equal(animationPoolSize({ cores: 4 }), 3);
+    assert.equal(animationPoolSize({ cores: 2 }), 1);
+    assert.equal(animationPoolSize({ cores: 1 }), 1);
+    assert.equal(animationPoolSize({}), 1);
+    assert.equal(animationPoolSize({ cores: 16, slowEngine: true }), 1);
+    assert.equal(animationPoolSize({ cores: 16, memoryGb: 2 }), 1);
+    assert.equal(animationPoolSize({ cores: 16, memoryGb: 4 }), 2);
+    assert.equal(animationPoolSize({ cores: 16, memoryGb: 8 }), 4);
+  });
+  await test("pool: renders the nearest frames in parallel, each in its own slot, never more than the pool size", async () => {
+    const { c, clock, log, pending, finish } = setup({ steps: 10, fps: 10 }, 3);
+    c.play(); await flush();
+    assert.deepEqual(log.rendered, [0.1, 0.2, 0.3], "next three frames, in order");
+    assert.deepEqual(log.slots, [0, 1, 2]);
+    await finish(1); // frame 2 completes first: its slot is reused by the next frame
+    assert.equal(pending.length, 3);
+    assert.deepEqual(log.rendered, [0.1, 0.2, 0.3, 0.4]);
+    assert.equal(log.slots[3], 1, "the freed slot is reused");
+    assert.deepEqual(log.shown, [], "frame 1 is not ready yet: out-of-order completions are not shown early");
+    await finish(0); // frame 1
+    assert.deepEqual(log.shown, [1]);
+    assert.ok(pending.length <= 3);
+    await clock.advance(0);
+    c.dispose();
+  });
+  await test("pool: playback order is kept when frames complete out of order", async () => {
+    const { c, clock, log, pending } = setup({ steps: 6, fps: 10 }, 3);
+    c.play(); await flush();
+    while (pending.length) { pending.pop()!.resolve(); await flush(); await clock.advance(0); } // (newest first)
+    for (let i = 0; i < 12; i++) { await clock.advance(100); c.notifyLoaded(); }
+    const seq = log.shown;
+    assert.ok(seq.length > 3);
+    for (let i = 1; i < seq.length; i++) assert.equal(seq[i], (seq[i - 1] + 1) % 6, `frame ${seq[i]} follows ${seq[i - 1]}`);
+    c.dispose();
+  });
+  await test("pool: a scrub kills the look-ahead but keeps its target, an edit kills all", async () => {
+    const { c, clock, log, pending } = setup({ steps: 10, fps: 10 }, 3);
+    c.play(); await flush();
+    assert.equal(pending.length, 3);
+    c.seek(7); // pauses: look-ahead renders are dropped, the target is rendered after the debounce
+    assert.equal(log.killed, 3);
+    await clock.advance(SEEK_DEBOUNCE_MS + 1);
+    assert.equal(pending.length, 1);
+    assert.equal(log.rendered[log.rendered.length - 1], 0.7);
+    c.play(); await flush();
+    assert.ok(pending.length > 1 && pending.length <= 3);
+    const running = pending.length, before = log.killed;
+    c.invalidate("other"); // an edit
+    assert.equal(log.killed - before, running);
+    assert.equal(pending.length, 0);
+    assert.ok(!c.hasInflight);
+    c.dispose();
+  });
+  await test("pool: a normal render yields every running frame and resumes afterwards", async () => {
+    const { c, clock, log, pending } = setup({ steps: 10, fps: 10 }, 2);
+    c.play(); await flush();
+    assert.equal(pending.length, 2);
+    log.busy = true; c.yieldToRender();
+    assert.equal(pending.length, 0);
+    await clock.advance(500);
+    assert.equal(pending.length, 0, "no new render while busy");
+    log.busy = false; c.resume(); await flush();
+    assert.equal(pending.length, 2);
+    c.dispose();
+  });
+  await test("pool: a failing frame stops everything", async () => {
+    const { c, log, pending } = setup({ steps: 10, fps: 10 }, 3);
+    c.play(); await flush();
+    pending[1].fail(new Error("boom")); await flush();
+    assert.ok(!c.isPlaying);
+    assert.equal(log.errors.length, 1);
+    assert.equal(log.killed, 2, "the other renders were killed");
     c.dispose();
   });
 

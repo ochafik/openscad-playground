@@ -11,7 +11,8 @@
  * Rules:
  *  - Frames are rendered in the background only while playing (look-ahead from
  *    the current frame, bounded by the cache), or on demand for a scrubbed-to
- *    frame, one render at a time.
+ *    frame, at most `host.concurrency()` renders at a time (a small pool; each
+ *    render gets a free `slot`, 0..concurrency-1). The nearest frames go first.
  *  - The displayed model is only swapped when the next frame is ready AND the
  *    viewer reported the previous one loaded (no flicker, no frame pile-up).
  *  - Playback never advances onto a frame that is not ready: it waits for it
@@ -44,6 +45,19 @@ export const FRAME_CACHE_MAX_BYTES = 96 * 1024 * 1024;
 export const LOAD_TIMEOUT_MS = 1500;
 /** Scrubbing: render the requested frame once the slider rested this long. */
 export const SEEK_DEBOUNCE_MS = 120;
+
+/**
+ * How many frames to render at the same time: each one runs in its own worker (and engine instance, tens of MB), so
+ * leave a core for the page and the viewer, and stay modest on small devices. The JavaScript engine (wasm2js) is
+ * memory hungry and slow enough to saturate a core: one at a time.
+ */
+export function animationPoolSize({cores, memoryGb, slowEngine}: {cores?: number, memoryGb?: number, slowEngine?: boolean}): number {
+  if (slowEngine) return 1;
+  let n = Math.min(4, Math.max(1, Math.floor((cores ?? 2) - 1)));
+  if (memoryGb !== undefined && memoryGb <= 2) n = 1;
+  else if (memoryGb !== undefined && memoryGb <= 4) n = Math.min(n, 2);
+  return n;
+}
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
@@ -113,8 +127,10 @@ export interface AnimationFrame {
 
 export interface AnimationHost<F extends AnimationFrame> {
   settings(): AnimationSettings;
-  /** Render the frame at animation time `t`. Must reject with SupersededError when killed. */
-  renderFrame(t: number): AbortablePromise<F>;
+  /** Render the frame at animation time `t` in the given pool slot. Must reject with SupersededError when killed. */
+  renderFrame(t: number, slot: number): AbortablePromise<F>;
+  /** How many frames may be rendered at the same time (>= 1). */
+  concurrency(): number;
   /** Display a frame. */
   show(frame: F, index: number): void;
   /** Free what a frame holds (object URLs). */
@@ -150,7 +166,7 @@ export class AnimationController<F extends AnimationFrame> {
   private frame = 0;
   private playing = false;
   private seekTarget: number | null = null;
-  private inflight: { index: number; job: AbortablePromise<F> } | null = null;
+  private inflight = new Map<number, { job: AbortablePromise<F>; slot: number }>();
   private tickTimer: unknown = null;
   private seekTimer: unknown = null;
   private loadTimer: unknown = null;
@@ -176,7 +192,7 @@ export class AnimationController<F extends AnimationFrame> {
   get currentFrame() { return this.frame; }
   /** The frame index currently displayed by the controller (-1: none, e.g. after a normal render replaced it). */
   get shown() { return this.shownIndex; }
-  get hasInflight() { return this.inflight != null; }
+  get hasInflight() { return this.inflight.size > 0; }
   get t() { return this.frame / this.host.settings().steps; }
 
   private steps() { return this.host.settings().steps; }
@@ -223,10 +239,13 @@ export class AnimationController<F extends AnimationFrame> {
     }
   }
 
-  private killInflight() {
-    const inflight = this.inflight;
-    this.inflight = null;
-    inflight?.job.kill();
+  /** Kill the running renders, except the one of frame `except`. */
+  private killInflight(except?: number) {
+    for (const [index, { job }] of [...this.inflight]) {
+      if (index === except) continue;
+      this.inflight.delete(index);
+      job.kill();
+    }
   }
 
   /** A normal render starts: yield. Background rendering resumes with {@link resume}. */
@@ -240,7 +259,7 @@ export class AnimationController<F extends AnimationFrame> {
     this.stalled = false;
     if (this.tickTimer != null) { this.timers.clearTimeout(this.tickTimer); this.tickTimer = null; }
     // Look-ahead renders are no longer wanted; an on-demand seek render still is.
-    if (this.inflight && this.inflight.index !== this.seekTarget) this.killInflight();
+    this.killInflight(this.seekTarget ?? undefined);
     this.publish();
   }
 
@@ -318,11 +337,11 @@ export class AnimationController<F extends AnimationFrame> {
     const cached = this.cache.get(this.keyOf(index));
     if (cached) {
       this.seekTarget = null;
-      if (this.inflight) this.killInflight();
+      this.killInflight();
       this.display(cached, index);
     } else {
       this.seekTarget = index;
-      if (this.inflight && this.inflight.index !== index) this.killInflight();
+      this.killInflight(index);
       const near = nearestCached(index, steps, this.isCached);
       const stand = near === undefined ? undefined : this.cache.peek(this.keyOf(near));
       if (stand && stand.url !== this.lastUrl) this.display(stand, near!);
@@ -361,28 +380,36 @@ export class AnimationController<F extends AnimationFrame> {
     if (this.disposed || this.host.busy()) return;
     if (this.host.hidden() && this.seekTarget == null) return;
     const wanted = this.wanted();
-    if (this.inflight) {
-      // Keep the running render only if it is still the most urgent one.
-      if (wanted[0] === this.inflight.index || (wanted.includes(this.inflight.index) && this.seekTarget == null)) return;
-      this.killInflight();
+    // Keep the running renders that are still wanted, kill the others.
+    for (const [index, { job }] of [...this.inflight]) {
+      if (!wanted.includes(index)) { this.inflight.delete(index); job.kill(); }
     }
-    if (wanted.length) this.start(wanted[0]);
+    // Fill the free slots with the most urgent frames.
+    const slots = Math.max(1, Math.floor(this.host.concurrency()));
+    for (const index of wanted) {
+      if (this.inflight.size >= slots) break;
+      if (this.inflight.has(index)) continue;
+      const used = new Set([...this.inflight.values()].map(j => j.slot));
+      let slot = 0;
+      while (used.has(slot)) slot++;
+      if (!this.start(index, slot)) break;
+    }
   }
 
-  private start(index: number) {
+  private start(index: number, slot: number): boolean {
     const key = this.key;
     const frameK = this.keyOf(index);
     let job: AbortablePromise<F>;
     try {
-      job = this.host.renderFrame(index / this.steps());
+      job = this.host.renderFrame(index / this.steps(), slot);
     } catch (e) {
       this.fail(e);
-      return;
+      return false;
     }
-    this.inflight = { index, job };
+    this.inflight.set(index, { job, slot });
     job.then(frame => {
-      if (this.inflight?.job !== job || this.key !== key || this.disposed) { this.host.release(frame); return; }
-      this.inflight = null;
+      if (this.inflight.get(index)?.job !== job || this.key !== key || this.disposed) { this.host.release(frame); return; }
+      this.inflight.delete(index);
       this.cache.set(frameK, frame);
       if (this.seekTarget === index) {
         this.seekTarget = null;
@@ -394,10 +421,11 @@ export class AnimationController<F extends AnimationFrame> {
       this.publish();
       this.pump();
     }, err => {
-      if (this.inflight?.job === job) this.inflight = null;
+      if (this.inflight.get(index)?.job === job) this.inflight.delete(index);
       if (err instanceof SupersededError || this.key !== key || this.disposed) return;
       this.fail(err);
     });
+    return true;
   }
 
   private fail(e: unknown) {

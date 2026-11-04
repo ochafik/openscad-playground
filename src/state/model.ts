@@ -1,11 +1,11 @@
 // Portions of this file are Copyright 2021 Google LLC, and licensed under GPL2+. See COPYING.
 
-import { checkSyntax, render, renderIsolated, renderAnimationFrame, RenderArgs, RenderOutput } from "../runner/actions.ts";
+import { checkSyntax, render, renderIsolated, renderAnimationFrameInSlot, MAX_FRAME_SLOTS, RenderArgs, RenderOutput } from "../runner/actions.ts";
 import { FileOutput, MultiLayoutComponentId, SingleLayoutComponentId, State, StatePersister } from "./app-state.ts";
 import { VALID_EXPORT_FORMATS_2D, VALID_EXPORT_FORMATS_3D } from './formats.ts';
 import { bubbleUpDeepMutations } from "./deep-mutate.ts";
 import { AbortablePromise, downloadUrl, fetchSource, formatBytes, formatMillis, readFileAsDataURL, SupersededError } from '../utils.ts'
-import { AnimationController, AnimationFrame, AnimationInfo, AnimationRequest, AnimationSettings, clampSettings, DEFAULT_SETTINGS, DEFAULT_SETTINGS_SLOW, FRAME_CACHE_MAX_ENTRIES, frameAt } from "./animation.ts";
+import { AnimationController, AnimationFrame, AnimationInfo, AnimationRequest, AnimationSettings, animationPoolSize, clampSettings, DEFAULT_SETTINGS, DEFAULT_SETTINGS_SLOW, FRAME_CACHE_MAX_ENTRIES, frameAt } from "./animation.ts";
 import { projectUsesAnimationTime } from "./animation-detect.ts";
 import { projectKey } from "./animation-cache.ts";
 import { detectWasmSupport, getForcedEngine } from "../runner/wasm-support.ts";
@@ -29,6 +29,16 @@ interface RenderedFrame extends AnimationFrame {
   is2D: boolean;
 }
 
+/** Frames rendered at the same time (`?animationWorkers=N` overrides, for testing and profiling). */
+function animationConcurrency(): number {
+  try {
+    const forced = parseInt(new URLSearchParams(globalThis.location?.search ?? '').get('animationWorkers') ?? '', 10);
+    if (forced >= 1) return Math.min(forced, MAX_FRAME_SLOTS);
+  } catch { /* no location */ }
+  const nav = globalThis.navigator as (Navigator & {deviceMemory?: number}) | undefined;
+  return animationPoolSize({cores: nav?.hardwareConcurrency, memoryGb: nav?.deviceMemory, slowEngine: isSlowEngine()});
+}
+
 const isSlowEngine = () => !detectWasmSupport() || getForcedEngine() === 'wasm2js';
 
 export class Model {
@@ -50,7 +60,8 @@ export class Model {
     private statePersister?: StatePersister) {
     this.animation = new AnimationController<RenderedFrame>({
       settings: () => this.animationSettings,
-      renderFrame: t => this.renderFrameJob(t),
+      renderFrame: (t, slot) => this.renderFrameJob(t, slot),
+      concurrency: () => animationConcurrency(),
       show: frame => this.showFrame(frame),
       release: frame => this.releaseFrame(frame),
       busy: () => !!(this.state.previewing || this.state.rendering),
@@ -543,7 +554,7 @@ export class Model {
   }
 
   /** Render one frame: a preview of the active file with `$t` set. Cancellable (killed => SupersededError). */
-  private renderFrameJob(t: number): AbortablePromise<RenderedFrame> {
+  private renderFrameJob(t: number, slot: number): AbortablePromise<RenderedFrame> {
     const {activePath, sources, vars, features} = this.state.params;
     const frameT = Math.round(t * 1e6) / 1e6;
     const args: RenderArgs = {
@@ -559,12 +570,12 @@ export class Model {
     return AbortablePromise<RenderedFrame>((resolve, reject) => {
       let killed = false;
       const t0 = performance.now();
-      const job = renderAnimationFrame(args)({now: true});
+      const job = renderAnimationFrameInSlot(slot)(args)({now: true});
       (async () => {
         try {
           const output = await job;
           const t1 = performance.now();
-          const {displayFile, is2D} = await this.toDisplayFile(output, features, renderAnimationFrame);
+          const {displayFile, is2D} = await this.toDisplayFile(output, features, renderAnimationFrameInSlot(slot));
           const t2 = performance.now();
           const displayFileURL = await readFileAsDataURL(displayFile);
           if (killed) return;
