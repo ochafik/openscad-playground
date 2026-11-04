@@ -1,7 +1,7 @@
 # Animation (`$t`)
 
 A model that reads OpenSCAD's animation variable `$t` (0 <= `$t` < 1) gets a play/pause button and a time slider, in the
-web app's footer, in the embed toolbar (next to Render, with the slider along the bottom of the viewer) and in the MCP
+web app's footer, in the embed toolbar (with the slider along the bottom of the viewer) and in the MCP
 app. Play loops the animation; the slider scrubs it; the gear next to `$t=...` sets the loop (**steps** = frames per loop,
 **fps**; the popover also shows the resulting duration).
 

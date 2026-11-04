@@ -228,10 +228,8 @@ describe('animation', () => {
     await load(SPIN, { animation: { steps: 4, fps: 20 }, query: '?embed=1' });
     await page.waitForSelector(`[role=toolbar] ${PLAY}`, { timeout: 60000 });
     const labels = await page.$$eval('[role=toolbar][aria-label="Viewer actions"] [aria-label]', els => els.map(e => e.getAttribute('aria-label')));
-    const renderAt = labels.findIndex(l => l === 'Render' || l === 'Rendering…'); // (busy while the first preview renders)
-    expect(renderAt).toBeGreaterThanOrEqual(0);
-    expect(labels.indexOf('Play animation')).toBeGreaterThanOrEqual(0);
-    expect(labels.indexOf('Play animation')).toBeLessThan(renderAt);
+    expect(labels).toContain('Play animation');
+    expect(labels).not.toContain('Render');
     const box = await page.$eval(SLIDER, e => { const r = e.getBoundingClientRect(); return { bottom: r.bottom, h: innerHeight, w: r.width }; });
     expect(box.bottom).toBeGreaterThan(box.h - 60);
     expect(box.w).toBeGreaterThan(60);
@@ -239,9 +237,9 @@ describe('animation', () => {
     await page.click(`[role=toolbar] ${PLAY}`);
     await page.waitForSelector(`[role=toolbar] ${PAUSE}`);
     await page.waitForFunction(() => document.querySelector('[data-testid=animation-time]').textContent === '$t=0.50', { timeout: 90000 });
-    // Embed without $t: no animation controls, Render stays.
+    // Embed without $t: no animation controls.
     await load('cube(3);', { query: '?embed=1' });
-    await page.waitForSelector('[role=toolbar] [aria-label="Render"]', { timeout: 60000 });
+    await page.waitForSelector('[role=toolbar] [aria-label="Download"]', { timeout: 60000 });
     expect(await page.$(PLAY)).toBeNull();
   }, longTimeout * 2);
 
@@ -251,7 +249,6 @@ describe('animation', () => {
     await page.evaluate((u) => { document.body.innerHTML = `<iframe style="width:900px;height:500px" src="${u}"></iframe>`; }, url);
     const frame = await (await page.waitForSelector('iframe')).contentFrame();
     await frame.waitForSelector(`[role=toolbar] ${PLAY}`, { timeout: 60000 });
-    await frame.waitForSelector('[role=toolbar] [aria-label="Render"]');
     await frame.click(`[role=toolbar] ${PLAY}`);
     await frame.waitForSelector(`[role=toolbar] ${PAUSE}`);
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].location?.url?.endsWith('/favicon.ico')) messages.splice(i, 1);

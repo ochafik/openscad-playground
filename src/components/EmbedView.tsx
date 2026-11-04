@@ -129,25 +129,9 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
     }, opts.level ?? 'info', msg, { essential: opts.essential });
   }, []);
 
-  // Render: the full render (F6). Announces completion or the first error.
-  const userRender = useRef(false);
+  // There is no Render button here: Download renders in full when it must (Model.ensureFullRender) and F6 / the
+  // render tools still start a full render. Whether anything is busy drives the progress bar and the Download label.
   const busyNow = !!(state.rendering || state.previewing || state.checkingSyntax);
-  const doRender = useCallback(() => {
-    userRender.current = true;
-    model.render({ isPreview: false, now: true });
-  }, [model]);
-  const wasBusy = useRef(false);
-  useEffect(() => {
-    if (wasBusy.current && !busyNow && userRender.current) {
-      userRender.current = false;
-      const s = model.state;
-      const err = s.error ?? s.lastCheckerRun?.markers.find(m => m.severity === 8)?.message;
-      // The sole feedback of an explicit Render click: essential.
-      flash(err ? `Render failed: ${err}` : `Rendered${s.output ? ` in ${s.output.formattedElapsedMillis}` : ''}`,
-        { level: err ? 'error' : 'success', essential: true, ms: err ? 8000 : 3000 });
-    }
-    wasBusy.current = busyNow;
-  }, [busyNow, model, flash]);
 
   // Download: format menu, then onDownload.
   const [menuOpen, setMenuOpen] = useState(false);
@@ -411,14 +395,6 @@ export default function EmbedView({ viewerRef, isDark, disableZoom, showHint, on
             onClick={() => model.animation.toggle()}
           />
         )}
-        <span className={busyNow ? 'embed-spin' : undefined} style={{ display: 'flex' }}>
-          <CornerButton
-            icon={busyNow ? EmbedIcons.spinner : EmbedIcons.render}
-            label={busyNow ? 'Rendering…' : 'Render'}
-            disabled={busyNow}
-            onClick={doRender}
-          />
-        </span>
         {onDownload && (
           <span className={downloading && busyNow ? 'embed-spin' : undefined} style={{ display: 'flex' }}>
           <CornerButton
@@ -511,7 +487,6 @@ export const EmbedIcons = {
   maximize: <SVG><polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" y1="3" x2="14" y2="10" /><line x1="3" y1="21" x2="10" y2="14" /></SVG>,
   minimize: <SVG><polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" /><line x1="14" y1="10" x2="21" y2="3" /><line x1="3" y1="21" x2="10" y2="14" /></SVG>,
   check: <SVG><polyline points="20 6 9 17 4 12" /></SVG>,
-  render: <SVG><polygon points="6 4 20 12 6 20 6 4" /></SVG>,
   spinner: <SVG><path d="M21 12a9 9 0 1 1-6.2-8.55" /></SVG>,
   download: <SVG><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></SVG>,
   layout: <SVG><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" /></SVG>,

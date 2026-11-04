@@ -198,11 +198,11 @@ The view registers these with the host during the `ui/initialize` handshake (def
 | `set_view_options` | `show_axes`. (There is no shadows or wireframe mode.) |
 | `screenshot` | PNG/JPEG image blocks of the 3D canvas (`max_size` up to 1024). `views: ["iso","front","top"]` returns several angles in one call; the camera is restored unless `keep_camera`. |
 
-The embed toolbar also has **Render** (full render, spinner while running, result announced) and **Download** (format menu; uses the host's `ui/download-file`, else attaches the file to the chat, else shows a manual save link, since the sandboxed iframe cannot save files itself).
+The embed toolbar has **Download** (there is no Render button: a download first makes sure the model it exports is a full, non-preview render of what is shown, labelled "Rendering…" while that runs, and the viewer then shows that full render; F6 and the `render` tool still start one; format menu; uses the host's `ui/download-file`, else attaches the file to the chat, else shows a manual save link, since the sandboxed iframe cannot save files itself).
 
 The Download menu's first item, **SCAD (source)**, and `download_model format:"scad"` use the same delivery chain as model downloads (host `ui/download-file`, resource link, chat attachment, tool result, manual-save dialog). Multi-file projects: the active file (or `path`) is exported; there is no "all files (.zip)" option.
 
-The viewer opens in **embed mode** (see the main README): only the 3D view and a top-right toolbar (customizer toggle, render, download menu (first item: **SCAD (source)**, the active file's source), fullscreen when the host offers it, exit to the full editor). The customizer is a translucent side sheet docked on the right that overlays, and never resizes, the viewer; it closes with the toggle, Escape, or a tap outside on small screens. `set_layout` and the toolbar share the same state, so `get_viewer_state` always reports what the user sees.
+The viewer opens in **embed mode** (see the main README): only the 3D view and a top-right toolbar (customizer toggle, download menu (first item: **SCAD (source)**, the active file's source), fullscreen when the host offers it, exit to the full editor). The customizer is a translucent side sheet docked on the right that overlays, and never resizes, the viewer; it closes with the toggle, Escape, or a tap outside on small screens. `set_layout` and the toolbar share the same state, so `get_viewer_state` always reports what the user sees.
 
 Parameter presets are not exposed: the app has no preset concept (only the values the customizer holds), so there are no `list_presets`/`apply_preset` tools.
 

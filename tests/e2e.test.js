@@ -52,6 +52,13 @@ async function waitForViewer() {
     return viewer && viewer.src !== '';
   });
 }
+// The embed progress bar is visible while anything (syntax check, preview, full render) runs.
+function waitIdle(timeout = 60000) {
+  return page.waitForFunction(() => {
+    const bar = document.querySelector('.p-progressbar');
+    return !bar || getComputedStyle(bar).visibility === 'hidden';
+  }, { timeout });
+}
 function expectMessage(messages, line) {
   const successMessage = messages.filter(msg => msg.type === 'debug' && msg.text === line);
   expect(successMessage).toHaveLength(1);
@@ -719,13 +726,19 @@ describe('embed render and download', () => {
   const labels = () => page.evaluate(() =>
     Array.from(document.querySelectorAll('[role=toolbar][aria-label="Viewer actions"] [aria-label]')).map(e => e.getAttribute('aria-label')));
 
-  test('the toolbar has Render and Download; Render reports completion', async () => {
+  test('the toolbar has Download but no Render button (Download renders in full when needed; F6 still works)', async () => {
     await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent(cube)}`);
     await waitForViewer();
-    await page.waitForSelector('button[aria-label="Render"]', { timeout: 45000 });
-    expect(await labels()).toEqual(expect.arrayContaining(['Render', 'Download']));
-    await page.click('button[aria-label="Render"]');
-    await page.waitForFunction(() => /^Rendered/.test(document.querySelector('[role=status][aria-live=polite]')?.textContent ?? ''), { timeout: 60000 });
+    await page.waitForSelector('button[aria-label="Download"]', { timeout: 45000 });
+    expect(await labels()).toContain('Download');
+    expect(await labels()).not.toContain('Render');
+    expect(await page.$('button[aria-label="Render"]')).toBeNull();
+    expect(await page.$('button[aria-label="Rendering…"]')).toBeNull();
+    await waitIdle();
+    messages.length = 0;
+    await page.keyboard.press('F6');
+    await page.waitForFunction(() => document.querySelector('.p-progressbar') && getComputedStyle(document.querySelector('.p-progressbar')).visibility === 'visible', { timeout: 5000 });
+    await waitIdle();
   }, longTimeout);
 
   test('Download offers the 3D formats and delivers a valid binary STL', async () => {
@@ -785,7 +798,7 @@ describe('embed download renders in full first', () => {
     await page.waitForSelector('button[aria-label="Customize"]', { timeout: 45000 });
     await page.click('button[aria-label="Customize"]');
     await page.waitForSelector('[role=complementary][aria-label=Customizer] input.p-inputnumber-input');
-    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 45000 });
+    await waitIdle(45000);
     await page.click('[role=complementary][aria-label=Customizer] input.p-inputnumber-input');
     await page.$eval('[role=complementary][aria-label=Customizer] input.p-inputnumber-input', e => e.select());
     await page.keyboard.type('6');
@@ -803,7 +816,7 @@ describe('embed download renders in full first', () => {
     messages.length = 0;
     await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent(code.replace('size = 5', 'size = 6'))}`);
     await waitForViewer();
-    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 45000 });
+    await waitIdle(45000);
     await page.keyboard.press('F6');
     await page.waitForFunction(() => document.querySelector('model-viewer.main-viewer').src.startsWith('data:'), { timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
@@ -816,9 +829,10 @@ describe('embed download renders in full first', () => {
     await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent(code)}`);
     await waitForViewer();
     await page.waitForSelector('button[aria-label="Customize"]', { timeout: 45000 });
-    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 45000 });
+    await waitIdle(45000);
     await page.keyboard.press('F6');
-    await page.waitForFunction(() => !document.querySelector('[role=toolbar] button[aria-label="Rendering…"]'), { timeout: 60000 });
+    await page.waitForFunction(() => document.querySelector('.p-progressbar') && getComputedStyle(document.querySelector('.p-progressbar')).visibility === 'visible', { timeout: 5000 });
+    await waitIdle();
     await new Promise(r => setTimeout(r, 1500));
     expect(fullRenders()).toBe(1);
     await page.click('button[aria-label="Customize"]');
@@ -861,14 +875,14 @@ describe('full app export menu', () => {
 describe('render supersede', () => {
   test('a full render started while the initial preview is still pending leaves nothing stuck busy', async () => {
     // Regression: the full render cancelled the debounced preview, whose promise never settled, so `previewing`
-    // stayed true: the Render button spun forever and tools waiting for idle timed out.
+    // stayed true: the busy indicator spun forever and tools waiting for idle timed out.
     await page.goto(`${baseUrl}?embed=1#src=${encodeURIComponent('cube([5, 5, 5]);')}`);
-    // The toolbar shows "Rendering…" (disabled) while the initial preview is pending; F6 is the full render.
-    await page.waitForSelector('[role=toolbar] button[aria-label="Rendering…"], [role=toolbar] button[aria-label="Render"]', { timeout: 45000 });
+    // The progress bar shows while the initial preview is pending; F6 is the full render.
+    await page.waitForSelector('button[aria-label="Download"]', { timeout: 45000 });
     await page.keyboard.press('F6'); // within the preview debounce window: cancels the pending preview
-    await page.waitForSelector('[role=toolbar] button[aria-label="Render"]:not([disabled])', { timeout: 60000 });
+    await waitIdle();
     await new Promise(r => setTimeout(r, 2500)); // longer than the preview debounce
-    expect(await page.$('[role=toolbar] button[aria-label="Render"]:not([disabled])')).not.toBeNull();
+    expect(await page.$eval('.p-progressbar', e => getComputedStyle(e).visibility)).toBe('hidden');
   }, longTimeout);
 });
 
